@@ -26,3 +26,11 @@ tick on the beat.
 A work timer to let folks know that you are working.
 
 ![Screenshot of pomodoro](/pomodoro/promo/pomodoro_grab.png)
+
+
+## [Night Clock](night_clock/)
+
+A single-screen bedside and desk night clock with 24H retro LED dot-matrix digital & minimalist analog modes, local timezone shift (`TZ +/-`), volume & brightness controls, and a single alarm.
+
+![Screenshot of night clock](/night_clock/promo/digital_clock.png)
+
