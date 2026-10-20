@@ -34,3 +34,11 @@ A single-screen bedside and desk night clock with 24H retro LED dot-matrix digit
 
 ![Screenshot of night clock](/night_clock/promo/digital_clock.png)
 
+
+## [Boot Logo Customizer](boot_logo/)
+
+A surgical boot logo modifier for Knulli Scarab on the RG 35xxSP that previews 4 custom `640x480` boot logos at 1:1 resolution, writes `/boot/bootlogo.bmp` with SHA-256 read-back verification, and preserves the stock boot logo for instant restoration.
+
+![Screenshot of boot logo customizer](/boot_logo/promo/shot_theme2_gba_kitchen.png)
+
+
