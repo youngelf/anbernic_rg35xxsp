@@ -6,7 +6,7 @@ An interactive **Circle of Fifths, Diatonic Harmony Explorer, CAGED Guitar Voici
 
 ## Screenshots
 
-### 1. Circle of Fifths, Open CAGED Voicing & Live Waveform Scope (Key of C Major)
+### 1. Circle of Fifths & Open CAGED Voicing (Key of C Major)
 ![ChordWheel Main View](promo/chordwheel_main.png)
 
 ### 2. Jazz 7th Chords (`B`), Locked Key (`SELECT`), 6-String E-Barre Voicing & Chorus Electric Timbre
@@ -31,7 +31,7 @@ An interactive **Circle of Fifths, Diatonic Harmony Explorer, CAGED Guitar Voici
 3. **Native `640×480` High-Resolution Display & Anti-Aliased Typography**:
    - Renders a large anti-aliased **3-ring Circle of Fifths** (`R=156 px`) on the left alongside a **3-card Guitar Inspector** on the right:
      1. **Harmonic Function & Spelling Card**: Displays chord symbol, Roman numeral badge, functional harmony role, note spelling, triad/7th indicator, and active timbre badge.
-     2. **Interactive 6-String Fretboard & Live Oscilloscope**: Displays **3 movable voicings per chord (`L1`/`R1`)** (Open/CAGED, 6-string E-shape barre, 5-string A-shape barre) with color-coded interval badges (`R`, `3`/`b3`, `5`/`b5`, `7`/`b7`), real-time vibrating string animation, and a live **oscilloscope waveform monitor**.
+     2. **Interactive 6-String Rosewood Fretboard**: Displays **3 movable voicings per chord (`L1`/`R1`)** (Open/CAGED, 6-string E-shape barre, 5-string A-shape barre) centered with wide 40 px string spacing and color-coded interval badges (`R`, `3`/`b3`, `5`/`b5`, `7`/`b7`).
      3. **Diatonic Scale Strip (`I` – `vii°`) & 4-Bar Progression Bar**: Highlights all 7 diatonic chords in the active key at a glance alongside the 4-slot progression looper bar at the bottom.
 4. **Hardware-Accurate RG 35xxSP & Desktop Keyboard Controls**:
    - Supports the Anbernic RG 35xxSP's `evdev` keycodes (`304`=A, `305`=B, `306`=X, `307`=Y, `308`=L1, `309`=R1, `310`/`314`=SELECT, `311`/`315`=START, `312`=L2, `313`=R2) as well as intuitive desktop keyboard keys (`A`, `B`, `X`, `Y`, `L`, `R`, `1`, `2`, `Tab`, `Enter`, cursor arrows) in `chordwheel_linux`.

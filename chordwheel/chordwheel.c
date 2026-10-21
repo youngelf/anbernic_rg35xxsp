@@ -349,7 +349,6 @@ static const char *k_timbre_names[3] = {
 };
 
 #define EKS_MAX_DELAY 1024
-#define SCOPE_SAMPLES 128
 
 typedef struct {
     float buf[EKS_MAX_DELAY];
@@ -375,11 +374,6 @@ typedef struct {
 static volatile uint32_t g_cmd_write_seq = 0;
 static uint32_t          g_cmd_read_seq  = 0;
 static StrumCommand      g_pending_cmd;
-
-/* Live telemetry exported from Background Audio thread -> UI thread */
-static volatile float    g_string_env[6] = {0};
-static volatile int16_t  g_scope_buf[SCOPE_SAMPLES] = {0};
-static volatile uint32_t g_scope_write_idx = 0;
 
 /* Audio thread internal state */
 static EksString g_eks[6];
@@ -409,7 +403,6 @@ static void init_eks_strum_in_audio_thread(const StrumCommand *cmd) {
         if (cmd->frets[s] < 0) {
             st->active = false;
             st->samples_left = 0;
-            g_string_env[s] = 0.0f;
             continue;
         }
 
@@ -495,8 +488,6 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
     static const float k_pan_l[6] = { 0.82f, 0.72f, 0.60f, 0.48f, 0.36f, 0.26f };
     static const float k_pan_r[6] = { 0.26f, 0.36f, 0.48f, 0.60f, 0.72f, 0.82f };
 
-    float env_peak[6] = {0};
-
     for (int f = 0; f < frames; f++) {
         float mix_l = 0.0f;
         float mix_r = 0.0f;
@@ -534,9 +525,6 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
             if (st->samples_left == 0) {
                 st->active = false;
             }
-
-            float abs_v = fabsf(cur);
-            if (abs_v > env_peak[s]) env_peak[s] = abs_v;
 
             mix_l    += cur * k_pan_l[s];
             mix_r    += cur * k_pan_r[s];
@@ -582,19 +570,6 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
 
         out[f * 2 + 0] = (int16_t)sl;
         out[f * 2 + 1] = (int16_t)sr;
-
-        if ((f & 3) == 0) {
-            uint32_t sw = g_scope_write_idx;
-            g_scope_buf[sw & (SCOPE_SAMPLES - 1)] = (int16_t)((sl + sr) >> 1);
-            g_scope_write_idx = sw + 1;
-        }
-    }
-
-    /* Update live string vibration envelopes for UI animation */
-    for (int s = 0; s < 6; s++) {
-        float prev = g_string_env[s];
-        float cur  = env_peak[s];
-        g_string_env[s] = (cur > prev) ? cur : (prev * 0.90f);
     }
 }
 
@@ -1908,7 +1883,7 @@ static void render_guitar_inspector_pane(void) {
     draw_text_centered(FONT_UI_11, px + pw - 104, 72, 96, 26,
                        k_timbre_names[g_timbre], RGB(186, 230, 253));
 
-    /* 2. 6-String Rosewood Fretboard + Live Vibrating Strings + Waveform Card (y = 114..340) */
+    /* 2. 6-String Rosewood Fretboard Card (y = 114..340) */
     int fy = 114, fh = 226;
     fill_rect(px, fy, pw, fh, RGB(21, 29, 45));
     draw_border(px, fy, pw, fh, 2, RGB(51, 68, 98));
@@ -1928,15 +1903,15 @@ static void render_guitar_inspector_pane(void) {
         base_fret = (min_fret < 99 && min_fret > 1) ? min_fret : (max_fret - 3);
     }
 
-    int grid_x  = px + 44;
-    int grid_y  = fy + 52;
-    int str_dx  = 30;            /* 5 string spaces * 30 = 150 px */
-    int fret_dy = 32;            /* 4 fret spaces * 32 = 128 px */
+    int str_dx  = 40;            /* 5 string spaces * 40 = 200 px */
+    int fret_dy = 34;            /* 4 fret spaces * 34 = 136 px */
     int grid_w  = str_dx * 5;
     int grid_h  = fret_dy * 4;
+    int grid_x  = px + (pw - grid_w) / 2 + 6;
+    int grid_y  = fy + 50;
 
     /* Rosewood fretboard background + side binding */
-    fill_rect(grid_x - 4, grid_y, grid_w + 9, grid_h + 2, RGB(54, 34, 24));
+    fill_rect(grid_x - 6, grid_y, grid_w + 13, grid_h + 2, RGB(54, 34, 24));
     fill_rect(grid_x, grid_y, grid_w + 1, grid_h + 1, RGB(38, 25, 20));
 
     /* Pearl fret inlay dots on frets 3, 5, 7, 9, 12 */
@@ -1956,11 +1931,11 @@ static void render_guitar_inspector_pane(void) {
 
     /* Nut bar or base fret indicator */
     if (base_fret == 1) {
-        fill_rect(grid_x - 2, grid_y - 5, grid_w + 5, 6, RGB(241, 245, 249));
+        fill_rect(grid_x - 3, grid_y - 5, grid_w + 7, 6, RGB(241, 245, 249));
     } else {
         char fr_str[12];
         snprintf(fr_str, sizeof(fr_str), "%dfr", base_fret);
-        draw_text_right(FONT_UI_13, grid_x - 8, grid_y + 6, fr_str, RGB(250, 204, 21));
+        draw_text_right(FONT_UI_13, grid_x - 15, grid_y + 8, fr_str, RGB(250, 204, 21));
         fill_rect(grid_x, grid_y, grid_w + 1, 2, RGB(148, 163, 184));
     }
 
@@ -1969,24 +1944,11 @@ static void render_guitar_inspector_pane(void) {
         fill_rect(grid_x, grid_y + f * fret_dy, grid_w + 1, 2, RGB(130, 142, 160));
     }
 
-    /* 6 guitar strings with real-time vibration displacement from background synth */
-    uint32_t anim_tick = get_ticks_ms();
+    /* 6 guitar strings */
     for (int s = 0; s < 6; s++) {
         int sx = grid_x + s * str_dx;
-        float env = g_string_env[s];
-        uint32_t s_col = (env > 0.04f) ? RGB(250, 204, 21) :
-                         ((s < 3) ? RGB(203, 213, 225) : RGB(155, 170, 190));
-
-        for (int yy = 0; yy <= grid_h; yy++) {
-            float vib = 0.0f;
-            if (env > 0.02f) {
-                float window = sinf(((float)yy / (float)grid_h) * (float)M_PI);
-                vib = sinf((float)yy * 0.25f + (float)anim_tick * 0.08f + (float)s) *
-                      window * fminf(env * 4.5f, 3.5f);
-            }
-            int draw_x = sx + (int)roundf(vib);
-            fill_rect(draw_x, grid_y + yy, (s < 2) ? 2 : 1, 1, s_col);
-        }
+        uint32_t s_col = (s < 3) ? RGB(203, 213, 225) : RGB(155, 170, 190);
+        fill_rect(sx, grid_y, (s < 2) ? 2 : 1, grid_h + 1, s_col);
 
         if (gv.frets[s] < 0) {
             draw_text_centered(FONT_UI_13, sx - 8, grid_y - 24, 16, 16, "X", RGB(248, 113, 113));
@@ -1994,7 +1956,7 @@ static void render_guitar_inspector_pane(void) {
             draw_text_centered(FONT_UI_13, sx - 8, grid_y - 24, 16, 16, "O", RGB(74, 222, 128));
         }
 
-        int sy_lbl = grid_y + grid_h + 6;
+        int sy_lbl = grid_y + grid_h + 8;
         if (gv.frets[s] >= 0) {
             int pc = (k_string_midi[s] + gv.frets[s]) % 12;
             bool is_root = (pc == rc.root_pc);
@@ -2038,37 +2000,10 @@ static void render_guitar_inspector_pane(void) {
                 bool is_root = (semi == 0);
                 uint32_t dot_fill = is_root ? RGB(245, 158, 11) : RGB(14, 165, 233);
                 uint32_t dot_bdr  = is_root ? RGB(254, 240, 138) : RGB(224, 242, 254);
-                draw_filled_circle_aa(cx, cy, 10.5f, dot_fill, dot_bdr);
+                draw_filled_circle_aa(cx, cy, 11.5f, dot_fill, dot_bdr);
                 draw_text_centered(FONT_UI_11, (int)cx - 10, (int)cy - 7, 20, 14,
                                    interval_label_for_semitones(semi), RGB(15, 23, 42));
             }
-        }
-    }
-
-    /* Live Stereo Audio Oscilloscope Box on the right of the Fretboard Card */
-    int ox = grid_x + grid_w + 18;
-    int ow = (px + pw) - ox - 8;
-    int oy = grid_y;
-    int oh = grid_h;
-    if (ow >= 48) {
-        fill_rect(ox, oy, ow, oh, RGB(13, 19, 31));
-        draw_border(ox, oy, ow, oh, 1, RGB(45, 62, 90));
-        draw_text_centered(FONT_UI_11, ox, oy - 20, ow, 16, "WAVE", RGB(125, 211, 252));
-
-        int mid_y = oy + oh / 2;
-        fill_rect(ox + 2, mid_y, ow - 4, 1, RGB(35, 48, 72));
-        uint32_t r_idx = g_scope_write_idx;
-        int prev_wy = mid_y;
-        for (int x = 2; x < ow - 2; x++) {
-            uint32_t s_idx = (r_idx - (uint32_t)((ow - 2 - x) * 3)) & (SCOPE_SAMPLES - 1);
-            int16_t samp = g_scope_buf[s_idx];
-            int wy = mid_y - (samp * (oh / 2 - 8)) / 32768;
-            if (wy < oy + 3)      wy = oy + 3;
-            if (wy > oy + oh - 4) wy = oy + oh - 4;
-            int y_min = (wy < prev_wy) ? wy : prev_wy;
-            int y_max = (wy > prev_wy) ? wy : prev_wy;
-            fill_rect(ox + x, y_min, 1, y_max - y_min + 2, RGB(52, 211, 153));
-            prev_wy = wy;
         }
     }
 
@@ -2224,17 +2159,12 @@ int main(int argc, char *argv[]) {
         const char *dir = argv[2];
         char path[512];
 
-        /* Synthesize a brief buffer so the waveform & string envelopes are active in screenshots */
-        uint8_t dummy_pcm[2048];
-
         /* 1. Key of C Major — Triads, Open C Major Voicing */
         g_key_sector = 0; g_cur_sector = 0; g_cur_ring = 0;
         g_key_locked = false; g_seventh_mode = false; g_voicing_idx = 0;
         g_timbre = TIMBRE_ACOUSTIC;
         g_show_help = false;
         apply_progression_preset(0);
-        strum_current_selection();
-        for (int i = 0; i < 16; i++) audio_callback(NULL, dummy_pcm, sizeof(dummy_pcm));
         render_ui();
         snprintf(path, sizeof(path), "%s/chordwheel_main.bmp", dir);
         save_bmp(path);
@@ -2245,8 +2175,6 @@ int main(int argc, char *argv[]) {
         g_timbre = TIMBRE_CHORUS;
         g_show_help = false;
         apply_progression_preset(2);
-        strum_current_selection();
-        for (int i = 0; i < 16; i++) audio_callback(NULL, dummy_pcm, sizeof(dummy_pcm));
         render_ui();
         snprintf(path, sizeof(path), "%s/chordwheel_7ths.bmp", dir);
         save_bmp(path);
@@ -2258,8 +2186,6 @@ int main(int argc, char *argv[]) {
         g_show_help = false;
         apply_progression_preset(3);
         g_loop_playing = true; g_loop_step = 2;
-        strum_current_selection();
-        for (int i = 0; i < 16; i++) audio_callback(NULL, dummy_pcm, sizeof(dummy_pcm));
         render_ui();
         snprintf(path, sizeof(path), "%s/chordwheel_loop.bmp", dir);
         save_bmp(path);
