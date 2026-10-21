@@ -7,7 +7,7 @@
  *
  * Controls on Anbernic RG35XX SP & Linux Host:
  *   A Button (Space / 'A')          : Play / Pause metronome (Primary Action)
- *   B / X Buttons (BackSpace / 'B') : Reset Tempo to 120 BPM (Secondary Action)
+ *   B Button (BackSpace / 'B')      : Reset Tempo to 120 BPM (Secondary Action)
  *   D-Pad UP / DOWN                 : Increase / Decrease Tempo (BPM)
  *   D-Pad LEFT / RIGHT              : Cycle Time Signature (4/4, 3/4, 2/4, 5/4, 7/4)
  *   L1 / R1 Shoulder Buttons        : Decrease / Increase Click Drop-Rate by 5% (0%..100%)
@@ -185,7 +185,7 @@ static InputAction mask_to_action(uint32_t mask) {
     if (mask & BTN_MENU)  return ACT_QUIT;
     if (mask & BTN_Y)     return ACT_HELP;
     if (mask & BTN_A)     return ACT_PLAY_PAUSE;
-    if (mask & (BTN_B | BTN_X)) return ACT_RESET_BPM;
+    if (mask & BTN_B)     return ACT_RESET_BPM;
     if (mask & BTN_UP)    return ACT_BPM_UP;
     if (mask & BTN_DOWN)  return ACT_BPM_DOWN;
     if (mask & BTN_LEFT)  return ACT_SIG_PREV;
@@ -684,12 +684,12 @@ static InputAction platform_poll_input(void) {
                 if (act != ACT_NONE) return act;
             } else if (ie.type == EV_ABS) {
                 /* D-Pad reported via Hat axes (ABS_HAT0X / ABS_HAT0Y) or analog axes */
-                if (ie.code == ABS_HAT0X) {
+                if (ie.code == 16 || ie.code == 0 || ie.code == 3) {
                     int prev = g_hat_x;
                     g_hat_x = ie.value;
                     if (g_hat_x < 0 && prev >= 0) return ACT_SIG_PREV;
                     if (g_hat_x > 0 && prev <= 0) return ACT_SIG_NEXT;
-                } else if (ie.code == ABS_HAT0Y) {
+                } else if (ie.code == 17 || ie.code == 1 || ie.code == 4) {
                     int prev = g_hat_y;
                     g_hat_y = ie.value;
                     if (g_hat_y < 0 && prev >= 0) return ACT_BPM_UP;
@@ -1230,7 +1230,7 @@ int main(int argc, char *argv[]) {
             draw_text_centered(canvas, CANVAS_W / 2, 27, "METRONOME CONTROLS", 2, col_gold);
 
             draw_text(canvas, 28,  58, "A BUTTON      : PLAY / PAUSE", 1, col_white);
-            draw_text(canvas, 28,  74, "B / X BUTTON  : RESET TO 120 BPM", 1, col_white);
+            draw_text(canvas, 28,  74, "B BUTTON      : RESET TO 120 BPM", 1, col_white);
             draw_text(canvas, 28,  90, "D-PAD UP/DOWN : TEMPO +/- 1 BPM", 1, col_cyan);
             draw_text(canvas, 28, 106, "D-PAD L/R     : TIME SIGNATURE", 1, col_cyan);
             draw_text(canvas, 28, 122, "L1 / R1       : DROP CLICK -/+ 5%", 1, col_gold);

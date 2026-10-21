@@ -63,10 +63,10 @@
  * -----------------------------------------------------------------------------------------
  * Physical   FDT Label  GPIO      Code (Dec/Hex)   Linux Header Macro  Standard RG35xxSP Role
  * ---------  ---------  --------  ---------------  ------------------  ----------------------------------
- * A (East)   keyA       PA0  (L)  304  (0x130)     BTN_SOUTH / BTN_A   Start/Stop Playback / Primary Act
- * B (South)  keyB       PA1  (L)  305  (0x131)     BTN_EAST  / BTN_B   Secondary Action / Back
- * X / Y (*)  keyX       PA2  (L)  306  (0x132)     BTN_C               Auxiliary Action / Help (*)
- * Y / X (*)  keyY       PA3  (L)  307  (0x133)     BTN_NORTH / BTN_X   Help Overlay (Y) (*)
+ * B (South)  keyA       PA0  (L)  304  (0x130)     BTN_SOUTH / BTN_A   Secondary Action / Back (B)
+ * A (East)   keyB       PA1  (L)  305  (0x131)     BTN_EAST  / BTN_B   Start/Stop Playback / Primary (A)
+ * Y (West)   keyX       PA2  (L)  306  (0x132)     BTN_C               Help Overlay (Y)
+ * X (North)  keyY       PA3  (L)  307  (0x133)     BTN_NORTH / BTN_X   Auxiliary Action (X)
  * L1         keyL1      PA10 (L)  308  (0x134)     BTN_WEST  / BTN_Y   Primary Switcher (Prev / Dec)
  * R1         keyR1      PA12 (L)  309  (0x135)     BTN_Z               Primary Switcher (Next / Inc)
  * SELECT     keySEl     PA4  (L)  310  (0x136)     BTN_TL              Modal Shift (Switch App Mode)
@@ -82,15 +82,21 @@
  * LID CLOSE  hall-sw    GPIO      110  (0x06e)     KEY_INSERT          Clamshell Closed
  * LID OPEN   hall-sw    GPIO      111  (0x06f)     KEY_DELETE          Clamshell Opened
  *
- * (*) Note on 306 vs 307 (X and Y):
- *     In the Allwinner H700 Device Tree (`gpio_keys`), PA2 (`keyX`) is code 306 and PA3 (`keyY`)
- *     is code 307. However, in Knulli's `es_input.cfg`, code 306 is bound to `y` (West) and
- *     code 307 is bound to `x` (North). See `RG35XXSP_KNULLI_ES_XY` below to toggle if needed.
+ * (*) Note on Physical A/B and X/Y vs Kernel Evdev Codes (304..307):
+ *     The physical buttons printed on the Anbernic RG 35xxSP shell follow the Nintendo/SNES
+ *     layout (A=East, B=South, X=North, Y=West), whereas the H700 `gpio_keys` driver emits
+ *     Xbox/positional evdev codes:
+ *       - Physical B (South) -> 304 (0x130)
+ *       - Physical A (East)  -> 305 (0x131)
+ *       - Physical Y (West)  -> 306 (0x132)
+ *       - Physical X (North) -> 307 (0x133)
  *
- * (!!) Note on 314 (`BTN_SELECT`) and 315 (`BTN_START`):
- *     Because `<linux/input-event-codes.h>` names 0x13a (314) `BTN_SELECT` and 0x13b (315)
- *     `BTN_START`, standard Linux code that switches on `BTN_SELECT`/`BTN_START` macros
- *     accidentally binds L2 (314) and R2 (315) to Select/Start instead of 310 and 311!
+ * (!!) Note on `<linux/input-event-codes.h>` Macro Collisions:
+ *     `<linux/input-event-codes.h>` defines `BTN_LEFT=0x110`, `BTN_RIGHT=0x111`,
+ *     `BTN_A=0x130`, `BTN_B=0x131`, `BTN_X=0x133`, `BTN_Y=0x134`, `BTN_SELECT=0x13a`,
+ *     and `BTN_START=0x13b`. Therefore `<linux/input.h>` MUST be included BEFORE this
+ *     header's `#undef` block (done automatically below on Linux builds) so it can never
+ *     clobber our distinct `BTN_*` bitmask constants later in a translation unit.
  *
  * =========================================================================================
  * 3. DESKTOP / X64 (`HOST_X11`) KEYBOARD SIMULATION MAPPING
@@ -121,6 +127,16 @@
 
 #include <stdint.h>
 
+/*
+ * Include <linux/input.h> BEFORE undefining and defining our BTN_* bitmasks so
+ * that any subsequent `#include <linux/input.h>` later in a .c file is a no-op
+ * (due to _LINUX_INPUT_H header guard) and can NEVER overwrite BTN_LEFT,
+ * BTN_RIGHT, BTN_A, BTN_B, BTN_X, BTN_Y, BTN_SELECT, or BTN_START.
+ */
+#if defined(__linux__) && !defined(HOST_X11)
+#include <linux/input.h>
+#endif
+
 /* Undefine any colliding <linux/input-event-codes.h> BTN_* macros */
 #undef BTN_UP
 #undef BTN_DOWN
@@ -142,7 +158,7 @@
 #undef BTN_LID_CLOSE
 #undef BTN_LID_OPEN
 
-/* Canonical button bitmasks used across all RG 35xxSP applications */
+/* Canonical button bitmasks used across all RG 35xxSP applications (each is a distinct power-of-2 bit) */
 #define BTN_UP         (1u << 0)
 #define BTN_DOWN       (1u << 1)
 #define BTN_LEFT       (1u << 2)
@@ -190,11 +206,16 @@
 #define BTN_SWITCHER_SHOULDER  (BTN_L1 | BTN_R1)
 #define BTN_PRIMARY_SWITCHERS  (BTN_SWITCHER_DPAD_MASK | BTN_SWITCHER_SHOULDER)
 
-/* Raw Linux evdev keycodes on the Anbernic RG 35xxSP (`Anbernic RG35XX-SP Controller`) */
-#define RG35XXSP_EVKEY_A          304  /* 0x130 (BTN_SOUTH)  - Physical A (East)  */
-#define RG35XXSP_EVKEY_B          305  /* 0x131 (BTN_EAST)   - Physical B (South) */
-#define RG35XXSP_EVKEY_KEYX_RAW   306  /* 0x132 (BTN_C)      - FDT keyX / Knulli Y */
-#define RG35XXSP_EVKEY_KEYY_RAW   307  /* 0x133 (BTN_NORTH)  - FDT keyY / Knulli X */
+/*
+ * Raw Linux evdev keycodes on the Anbernic RG 35xxSP (`Anbernic RG35XX-SP Controller`).
+ * Note: The physical shell uses Nintendo/SNES face button labels (A=East, B=South, X=North, Y=West),
+ * while the H700 kernel GPIO driver emits 304 for South (B), 305 for East (A), 306 for West (Y),
+ * and 307 for North (X).
+ */
+#define RG35XXSP_EVKEY_B          304  /* 0x130 (BTN_SOUTH)  - Physical B (South / Bottom) */
+#define RG35XXSP_EVKEY_A          305  /* 0x131 (BTN_EAST)   - Physical A (East / Right)   */
+#define RG35XXSP_EVKEY_Y          306  /* 0x132 (BTN_C)      - Physical Y (West / Left)    */
+#define RG35XXSP_EVKEY_X          307  /* 0x133 (BTN_NORTH)  - Physical X (North / Top)    */
 #define RG35XXSP_EVKEY_L1         308  /* 0x134 (BTN_WEST)   - Physical L1 */
 #define RG35XXSP_EVKEY_R1         309  /* 0x135 (BTN_Z)      - Physical R1 */
 #define RG35XXSP_EVKEY_SELECT     310  /* 0x136 (BTN_TL)     - Physical SELECT */
@@ -210,18 +231,6 @@
 #define RG35XXSP_EVKEY_VOL_DOWN   114  /* 0x072 (KEY_VOLUMEDOWN) - Volume - */
 #define RG35XXSP_EVKEY_VOL_UP     115  /* 0x073 (KEY_VOLUMEUP)   - Volume + */
 #define RG35XXSP_EVKEY_POWER      116  /* 0x074 (KEY_POWER)      - PMIC Power key */
-
-/*
- * By default we follow the H700 Device Tree (`keyX = 306`, `keyY = 307`).
- * Define `RG35XXSP_KNULLI_ES_XY` to match Knulli `es_input.cfg` (`y = 306`, `x = 307`).
- */
-#ifdef RG35XXSP_KNULLI_ES_XY
-#define RG35XXSP_EVKEY_Y          RG35XXSP_EVKEY_KEYX_RAW
-#define RG35XXSP_EVKEY_X          RG35XXSP_EVKEY_KEYY_RAW
-#else
-#define RG35XXSP_EVKEY_X          RG35XXSP_EVKEY_KEYX_RAW
-#define RG35XXSP_EVKEY_Y          RG35XXSP_EVKEY_KEYY_RAW
-#endif
 
 /*
  * Translate a Linux `EV_KEY` code (`ev.code`) into a `BTN_*` bitmask.

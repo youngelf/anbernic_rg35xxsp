@@ -588,27 +588,11 @@ static bool platform_poll_input(input_state_t *out) {
                     }
                 }
             } else if (ie.type == EV_ABS) {
-                if (ie.code == ABS_HAT0X) {
-                    int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
-                    if (val != g_evdevs[i].hat_x) {
-                        uint32_t old_lr = g_cur_buttons & (BTN_LEFT | BTN_RIGHT);
-                        uint32_t new_lr = (val < 0) ? BTN_LEFT : (val > 0) ? BTN_RIGHT : 0;
-                        pressed_latch  |= (new_lr & ~old_lr);
-                        released_latch |= (old_lr & ~new_lr);
-                        g_cur_buttons   = (g_cur_buttons & ~(BTN_LEFT | BTN_RIGHT)) | new_lr;
-                        g_evdevs[i].hat_x = val;
-                    }
-                } else if (ie.code == ABS_HAT0Y) {
-                    int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
-                    if (val != g_evdevs[i].hat_y) {
-                        uint32_t old_ud = g_cur_buttons & (BTN_UP | BTN_DOWN);
-                        uint32_t new_ud = (val < 0) ? BTN_UP : (val > 0) ? BTN_DOWN : 0;
-                        pressed_latch  |= (new_ud & ~old_ud);
-                        released_latch |= (old_ud & ~new_ud);
-                        g_cur_buttons   = (g_cur_buttons & ~(BTN_UP | BTN_DOWN)) | new_ud;
-                        g_evdevs[i].hat_y = val;
-                    }
-                }
+                uint32_t old_btns = g_cur_buttons;
+                uint32_t new_btns = rg35xxsp_update_evabs(old_btns, ie.code, ie.value, 0, 0);
+                pressed_latch  |= (new_btns & ~old_btns);
+                released_latch |= (old_btns & ~new_btns);
+                g_cur_buttons   = new_btns;
             }
         }
     }
@@ -2004,8 +1988,8 @@ int main(int argc, char **argv) {
                 show_toast(msg, now_ms);
             }
 
-            /* SELECT or X Key: Switch between Retro LED Digital (24H) and Minimal Analog */
-            if (input.pressed & (BTN_SELECT | BTN_X)) {
+            /* SELECT Key: Switch between Retro LED Digital (24H) and Minimal Analog */
+            if (input.pressed & BTN_SELECT) {
                 g_is_analog = !g_is_analog;
                 save_config();
                 show_toast(g_is_analog ? "ANALOG CLOCK MODE" : "DIGITAL CLOCK MODE (24H)", now_ms);

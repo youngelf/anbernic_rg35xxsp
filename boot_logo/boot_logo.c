@@ -1498,7 +1498,7 @@ int main(int argc, char **argv) {
             if (input.pressed & (BTN_DOWN | BTN_RIGHT | BTN_R1)) {
                 cur_idx = (cur_idx + 1) % NUM_THEMES;
             }
-            if (input.pressed & (BTN_SELECT | BTN_X)) {
+            if (input.pressed & BTN_SELECT) {
                 full_preview_mode = !full_preview_mode;
             }
             if (input.pressed & BTN_Y) {

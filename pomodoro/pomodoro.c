@@ -6,7 +6,7 @@
  *
  * Controls:
  *   A Button (or 'A' / Space)       : Toggle Start / Pause timer (Primary Action)
- *   B / X Button (or 'B' / 'X')     : Reset current session timer (Secondary Action)
+ *   B Button (or 'B' / Backspace)   : Reset current session timer (Secondary Action)
  *   SELECT or LEFT / RIGHT          : Switch mode (Work <-> Short Break <-> Long Break)
  *   Y Button (or 'Y')               : Toggle Help overlay
  *   UP / DOWN or R1 / L1            : Adjust current mode duration (+/- 1 min when stopped)
@@ -741,8 +741,8 @@ static int SDL_PollEvent(SDL_Event *ev) {
                     enqueue_key_event(ie.value ? SDL_KEYDOWN : SDL_KEYUP, sym);
                 }
             } else if (ie.type == EV_ABS) {
-                /* D-Pad on RG35XXSP emits EV_ABS ABS_HAT0X (16) and ABS_HAT0Y (17) */
-                if (ie.code == ABS_HAT0X) {
+                /* D-Pad on RG35XXSP emits EV_ABS ABS_HAT0X (16) / ABS_HAT0Y (17) or stick axes */
+                if (ie.code == 16 || ie.code == 0 || ie.code == 3) {
                     int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
                     if (val != g_evdevs[i].hat_x) {
                         if (g_evdevs[i].hat_x < 0) enqueue_key_event(SDL_KEYUP, SDLK_LEFT);
@@ -751,7 +751,7 @@ static int SDL_PollEvent(SDL_Event *ev) {
                         if (val > 0) enqueue_key_event(SDL_KEYDOWN, SDLK_RIGHT);
                         g_evdevs[i].hat_x = val;
                     }
-                } else if (ie.code == ABS_HAT0Y) {
+                } else if (ie.code == 17 || ie.code == 1 || ie.code == 4) {
                     int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
                     if (val != g_evdevs[i].hat_y) {
                         if (g_evdevs[i].hat_y < 0) enqueue_key_event(SDL_KEYUP, SDLK_UP);
@@ -1360,8 +1360,8 @@ int main(int argc, char *argv[]) {
                         last_tick_ms = SDL_GetTicks();
                     }
                 }
-                /* B or X Button: Secondary Action — Reset current timer */
-                else if (k == V90_BTN_B || k == SDLK_b || k == V90_BTN_X || k == SDLK_x) {
+                /* B Button: Secondary Action — Reset current timer */
+                else if (k == V90_BTN_B || k == SDLK_b) {
                     status = STATUS_READY;
                     total_phase_sec = get_mode_duration(mode);
                     remaining_sec = total_phase_sec;
@@ -1646,7 +1646,7 @@ int main(int argc, char *argv[]) {
             draw_text_centered(screen, SCREEN_W / 2, 25, "POMODORO CONTROLS", 2, col_gold);
 
             draw_text(screen, 26,  54, "A BUTTON      : START / PAUSE TIMER", 1, col_white);
-            draw_text(screen, 26,  70, "B / X BUTTON  : RESET CURRENT PHASE", 1, col_white);
+            draw_text(screen, 26,  70, "B BUTTON      : RESET CURRENT PHASE", 1, col_white);
             draw_text(screen, 26,  86, "SELECT / L/R  : SWITCH WORK / BREAK", 1, col_break);
             draw_text(screen, 26, 102, "UP/DN / L1/R1 : DURATION +/- 1 MIN", 1, col_running);
             draw_text(screen, 26, 118, "L2 / R2       : DURATION +/- 5 MIN", 1, col_running);

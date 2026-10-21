@@ -15,14 +15,14 @@
  *        excitation, pick-stagger scheduling, and waveguide synthesis run in the background
  *        audio thread while exporting live string envelopes & waveform samples for 60 FPS UI.
  *   3. Exact Anbernic RG 35xxSP Hardware Evdev & Desktop X11 Key Mappings:
- *      - A (304 / BTN_SOUTH) : Strum selected 6-string guitar chord
- *      - B (305 / BTN_EAST)  : Toggle Triads (C, Am, G) <-> 7th Chords (Cmaj7, Am7, G7)
- *      - X (306 / BTN_C)     : Add current chord to 4-bar Progression
- *      - Y (307 / BTN_NORTH) : Open / Close Help, Progression Looper & Presets Modal
+ *      - A (305 / BTN_EAST)  : Strum selected 6-string guitar chord
+ *      - B (304 / BTN_SOUTH) : Toggle Triads (C, Am, G) <-> 7th Chords (Cmaj7, Am7, G7)
+ *      - X (307 / BTN_NORTH) : Add current chord to 4-bar Progression
+ *      - Y (306 / BTN_C)     : Open / Close Help, Progression Looper & Presets Modal
  *      - L1 / R1 (308 / 309) : Cycle Guitar Voicing (1: Open/CAGED, 2: E-Barre, 3: A-Barre)
- *      - L2 / R2 (312 / 313) : L2: Cycle Guitar Timbre | R2: Start/Stop 4-Bar Auto-Looper
- *      - SELECT (310 / 314)  : Toggle Key-Rotate Mode vs Chord-Explore (Locked Key) Mode
- *      - START / MENU        : Save state & Exit
+ *      - L2 / R2 (314 / 315) : L2: Cycle Guitar Timbre | R2: Start/Stop 4-Bar Auto-Looper
+ *      - SELECT (310)        : Toggle Key-Rotate Mode vs Chord-Explore (Locked Key) Mode
+ *      - MENU (312 / Esc)    : Save state & Exit
  *   4. Native 640x480 IPS High-Resolution UI:
  *      - 2x2 supersampled Circle of Fifths wheel with Roman numeral badges inside diatonic sectors
  *      - Rosewood 6-string guitar fretboard with curved barre indicators, interval labels inside
