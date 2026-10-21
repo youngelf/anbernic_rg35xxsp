@@ -840,8 +840,9 @@ static volatile bool g_alsa_running = false;
 
 static void *alsa_audio_worker(void *arg) {
     (void)arg;
+    int16_t buf[512 * AUDIO_CHANNELS];
     void *asound = dlopen("libasound.so.2", RTLD_LAZY);
-    if (!asound) return NULL;
+    void *pcm = NULL;
 
     typedef int  (*snd_open_fn)(void**, const char*, int, int);
     typedef int  (*snd_params_fn)(void*, int, int, unsigned int, unsigned int, int, unsigned int);
@@ -849,31 +850,40 @@ static void *alsa_audio_worker(void *arg) {
     typedef int  (*snd_recover_fn)(void*, int, int);
     typedef int  (*snd_close_fn)(void*);
 
-    snd_open_fn    fn_open    = (snd_open_fn)dlsym(asound, "snd_pcm_open");
-    snd_params_fn  fn_params  = (snd_params_fn)dlsym(asound, "snd_pcm_set_params");
-    snd_writei_fn  fn_writei  = (snd_writei_fn)dlsym(asound, "snd_pcm_writei");
-    snd_recover_fn fn_recover = (snd_recover_fn)dlsym(asound, "snd_pcm_recover");
-    snd_close_fn   fn_close   = (snd_close_fn)dlsym(asound, "snd_pcm_close");
+    snd_writei_fn  fn_writei  = NULL;
+    snd_recover_fn fn_recover = NULL;
+    snd_close_fn   fn_close   = NULL;
 
-    void *pcm = NULL;
-    if (!fn_open || !fn_params || !fn_writei || !fn_close) {
-        dlclose(asound);
-        return NULL;
-    }
-    if (fn_open(&pcm, "default", 0, 0) < 0 && fn_open(&pcm, "plughw:0,0", 0, 0) < 0) {
-        dlclose(asound);
-        return NULL;
-    }
-    fn_params(pcm, 2 /* S16_LE */, 3 /* RW_INTERLEAVED */, AUDIO_CHANNELS, SAMPLE_RATE, 1, 25000);
+    if (asound) {
+        snd_open_fn   fn_open   = (snd_open_fn)dlsym(asound, "snd_pcm_open");
+        snd_params_fn fn_params = (snd_params_fn)dlsym(asound, "snd_pcm_set_params");
+        fn_writei  = (snd_writei_fn)dlsym(asound, "snd_pcm_writei");
+        fn_recover = (snd_recover_fn)dlsym(asound, "snd_pcm_recover");
+        fn_close   = (snd_close_fn)dlsym(asound, "snd_pcm_close");
 
-    int16_t buf[512 * AUDIO_CHANNELS];
+        if (fn_open && fn_params && fn_writei && fn_close) {
+            if (fn_open(&pcm, "default", 0, 0) < 0 &&
+                fn_open(&pcm, "plughw:0,0", 0, 0) < 0 &&
+                fn_open(&pcm, "hw:0,0", 0, 0) < 0) {
+                pcm = NULL;
+            }
+            if (pcm) {
+                fn_params(pcm, 2 /* S16_LE */, 3 /* RW_INTERLEAVED */, AUDIO_CHANNELS, SAMPLE_RATE, 1, 25000);
+            }
+        }
+    }
+
     while (g_alsa_running) {
         audio_callback(NULL, (uint8_t *)buf, (int)sizeof(buf));
-        long w = fn_writei(pcm, buf, 512);
-        if (w < 0 && fn_recover) fn_recover(pcm, (int)w, 1);
+        if (pcm && fn_writei) {
+            long w = fn_writei(pcm, buf, 512);
+            if (w < 0 && fn_recover) fn_recover(pcm, (int)w, 1);
+        } else {
+            usleep(11600);
+        }
     }
-    fn_close(pcm);
-    dlclose(asound);
+    if (pcm && fn_close) fn_close(pcm);
+    if (asound) dlclose(asound);
     return NULL;
 }
 

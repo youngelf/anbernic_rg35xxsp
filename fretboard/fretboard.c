@@ -22,9 +22,8 @@
  *      - Maps evdev codes (304=A, 305=B, 306=X, 307=Y, 308=L1, 309=R1,
  *        310/314=SELECT, 311/315=START, 312=L2, 313=R2) plus desktop keys.
  *   4. Rich 640x480 Full-Neck Visualization:
- *      - Spacious 15-fret 6-string rosewood guitar neck with real-time vibrating
- *        string animation, glowing active plucked notes, CAGED box frames,
- *        6 alternate guitar tunings (R2 / '2'), and a live oscilloscope.
+ *      - Spacious 15-fret 6-string rosewood guitar neck with glowing active
+ *        plucked notes, CAGED box frames, and 6 alternate guitar tunings (R2 / '2').
  */
 
 #include <stdio.h>
@@ -69,7 +68,6 @@
 #define NUM_STRINGS     6
 #define MAX_FRET        15
 #define NUM_FRETS       16
-#define SCOPE_SAMPLES   512
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -261,8 +259,6 @@ static volatile int      g_active_play_str  = -1;
 static volatile int      g_active_play_fret = -1;
 static volatile int      g_active_play_ttl  = 0;
 static volatile float    g_string_env[NUM_STRINGS];
-static volatile int16_t  g_scope_buf[SCOPE_SAMPLES];
-static volatile uint32_t g_scope_write_idx = 0;
 
 static inline float rand_bipolar(void) {
     g_prng_state = g_prng_state * 1664525u + 1013904223u;
@@ -506,12 +502,6 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
         int16_t sr = (int16_t)out_r;
         out[i * 2 + 0] = sl;
         out[i * 2 + 1] = sr;
-
-        if ((i & 3) == 0) {
-            uint32_t sw = g_scope_write_idx;
-            g_scope_buf[sw & (SCOPE_SAMPLES - 1)] = (int16_t)((sl + sr) / 2);
-            g_scope_write_idx = sw + 1;
-        }
     }
 }
 
@@ -709,7 +699,8 @@ static struct fb_var_screeninfo g_vinfo;
 static struct fb_fix_screeninfo g_finfo;
 
 static pthread_t     g_alsa_thread;
-static volatile bool g_alsa_running = false;
+static volatile bool g_alsa_running   = false;
+static bool          g_use_sdl2_audio = false;
 
 typedef struct _snd_pcm snd_pcm_t;
 #define SND_PCM_STREAM_PLAYBACK 0
@@ -717,38 +708,44 @@ typedef struct _snd_pcm snd_pcm_t;
 
 static void *alsa_audio_worker(void *arg) {
     (void)arg;
+    int16_t buf[512 * AUDIO_CHANNELS];
     void *asound = dlopen("libasound.so.2", RTLD_LAZY);
-    if (!asound) return NULL;
-
-    int (*snd_open)(snd_pcm_t**, const char*, int, int) = dlsym(asound, "snd_pcm_open");
-    int (*snd_set_params)(snd_pcm_t*, int, int, unsigned int, unsigned int, int, unsigned int) = dlsym(asound, "snd_pcm_set_params");
-    long (*snd_writei)(snd_pcm_t*, const void*, unsigned long) = dlsym(asound, "snd_pcm_writei");
-    int (*snd_recover)(snd_pcm_t*, int, int) = dlsym(asound, "snd_pcm_recover");
-    int (*snd_close)(snd_pcm_t*) = dlsym(asound, "snd_pcm_close");
-
-    if (!snd_open || !snd_set_params || !snd_writei || !snd_close) {
-        dlclose(asound);
-        return NULL;
-    }
-
     snd_pcm_t *pcm = NULL;
-    if (snd_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
-        if (snd_open(&pcm, "plughw:0,0", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
-            dlclose(asound);
-            return NULL;
+    long (*snd_writei)(snd_pcm_t*, const void*, unsigned long) = NULL;
+    int (*snd_recover)(snd_pcm_t*, int, int) = NULL;
+    int (*snd_close)(snd_pcm_t*) = NULL;
+
+    if (asound) {
+        int (*snd_open)(snd_pcm_t**, const char*, int, int) = dlsym(asound, "snd_pcm_open");
+        int (*snd_set_params)(snd_pcm_t*, int, int, unsigned int, unsigned int, int, unsigned int) = dlsym(asound, "snd_pcm_set_params");
+        snd_writei  = dlsym(asound, "snd_pcm_writei");
+        snd_recover = dlsym(asound, "snd_pcm_recover");
+        snd_close   = dlsym(asound, "snd_pcm_close");
+
+        if (snd_open && snd_set_params && snd_writei && snd_close) {
+            if (snd_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0 &&
+                snd_open(&pcm, "plughw:0,0", SND_PCM_STREAM_PLAYBACK, 0) < 0 &&
+                snd_open(&pcm, "hw:0,0", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
+                pcm = NULL;
+            }
+            if (pcm) {
+                snd_set_params(pcm, SND_PCM_FORMAT_S16_LE, 3, AUDIO_CHANNELS, SAMPLE_RATE, 1, 40000);
+            }
         }
     }
-    snd_set_params(pcm, SND_PCM_FORMAT_S16_LE, 3, AUDIO_CHANNELS, SAMPLE_RATE, 1, 40000);
 
-    int16_t buf[512 * AUDIO_CHANNELS];
     while (g_alsa_running) {
         audio_callback(NULL, (uint8_t *)buf, sizeof(buf));
-        long r = snd_writei(pcm, buf, 512);
-        if (r < 0 && snd_recover) snd_recover(pcm, (int)r, 1);
+        if (pcm && snd_writei) {
+            long r = snd_writei(pcm, buf, 512);
+            if (r < 0 && snd_recover) snd_recover(pcm, (int)r, 1);
+        } else {
+            usleep(11600);
+        }
     }
 
-    snd_close(pcm);
-    dlclose(asound);
+    if (pcm && snd_close) snd_close(pcm);
+    if (asound) dlclose(asound);
     return NULL;
 }
 
@@ -797,7 +794,8 @@ static int platform_init(void) {
 
         if (fn_SDL_Init && fn_SDL_CreateWindow && fn_SDL_CreateRenderer &&
             fn_SDL_CreateTexture && fn_SDL_UpdateTexture && fn_SDL_RenderPresent) {
-            if (fn_SDL_Init(SDL2_INIT_VIDEO | SDL2_INIT_AUDIO) == 0) {
+            if (fn_SDL_Init(SDL2_INIT_VIDEO | SDL2_INIT_AUDIO) == 0 ||
+                fn_SDL_Init(SDL2_INIT_VIDEO) == 0) {
                 if (fn_SDL_ShowCursor) fn_SDL_ShowCursor(0);
                 g_sdl_win = fn_SDL_CreateWindow("Fretboard",
                                                 SDL2_WINDOWPOS_UNDEF, SDL2_WINDOWPOS_UNDEF,
@@ -823,6 +821,7 @@ static int platform_init(void) {
                     desired.callback = audio_callback;
                     if (fn_SDL_OpenAudio(&desired, NULL) == 0) {
                         fn_SDL_PauseAudio(0);
+                        g_use_sdl2_audio = true;
                     }
                 }
             }
@@ -838,6 +837,8 @@ static int platform_init(void) {
                 g_fb_mem = (uint8_t *)mmap(NULL, g_fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, g_fb_fd, 0);
             }
         }
+    }
+    if (!g_use_sdl2_audio) {
         g_alsa_running = true;
         pthread_create(&g_alsa_thread, NULL, alsa_audio_worker, NULL);
     }
@@ -1538,7 +1539,7 @@ static void render_theory_and_scope_card(const ComputedVoicing *cv) {
             snprintf(box_buf, sizeof(box_buf), "Box Frets %d-%d  |  %s%s",
                      low_f, high_f, k_note_names[g_root_pc], sc->skeleton_chord);
         }
-        draw_text_right(FONT_UI_13, 468, cy + 34, box_buf, RGB(110, 231, 183));
+        draw_text_right(FONT_UI_13, 618, cy + 34, box_buf, RGB(110, 231, 183));
 
     } else if (g_mode == MODE_CHORDS) {
         const ChordQualityDef *cd = &k_chords[g_chord_idx];
@@ -1594,26 +1595,6 @@ static void render_theory_and_scope_card(const ComputedVoicing *cv) {
                  k_note_names[cur_pc], cur_oct, cur_hz,
                  k_interval_labels[rel_iv], k_note_names[g_root_pc]);
         draw_text(FONT_UI_13, 18, cy + 56, cur_line, RGB(186, 230, 253));
-    }
-
-    /* Live Audio Waveform Oscilloscope on Right Side of Card (x = 480..622) */
-    int ox = 480, oy = cy + 8, ow = 142, oh = ch - 16;
-    fill_rect(ox, oy, ow, oh, RGB(12, 18, 30));
-    draw_border(ox, oy, ow, oh, 1, RGB(45, 62, 92));
-    int mid_y = oy + oh / 2;
-    fill_rect(ox + 2, mid_y, ow - 4, 1, RGB(32, 46, 70));
-    uint32_t r_idx = g_scope_write_idx;
-    int prev_wy = mid_y;
-    for (int x = 2; x < ow - 2; x++) {
-        uint32_t s_idx = (r_idx - (uint32_t)((ow - 2 - x) * 2)) & (SCOPE_SAMPLES - 1);
-        int16_t samp = g_scope_buf[s_idx];
-        int wy = mid_y - (samp * (oh / 2 - 4)) / 18000;
-        if (wy < oy + 2)      wy = oy + 2;
-        if (wy > oy + oh - 3) wy = oy + oh - 3;
-        int y0 = (wy < prev_wy) ? wy : prev_wy;
-        int y1 = (wy > prev_wy) ? wy : prev_wy;
-        fill_rect(ox + x, y0, 1, y1 - y0 + 2, RGB(52, 211, 153));
-        prev_wy = wy;
     }
 }
 
@@ -1699,7 +1680,7 @@ static void render_hero_fretboard(const ComputedVoicing *cv) {
     /* Bone Nut */
     fill_rect(nut_x - 4, str_y0 - 12, 6, neck_h + 24, RGB(241, 245, 249));
 
-    /* 6 Horizontal Guitar Strings with real-time vibration displacement */
+    /* 6 Horizontal Guitar Strings */
     for (int r = 0; r < NUM_STRINGS; r++) {
         int str_idx = 5 - r;
         int sy = str_y0 + r * str_dy;
@@ -1707,16 +1688,7 @@ static void render_hero_fretboard(const ComputedVoicing *cv) {
         uint32_t scol = (env > 0.05f) ? RGB(250, 204, 21) :
                         ((r >= 3) ? RGB(205, 175, 128) : RGB(195, 206, 222));
         int thick = (r >= 4) ? 3 : ((r >= 2) ? 2 : 1);
-
-        if (env > 0.04f) {
-            for (int x = 0; x < neck_w; x++) {
-                float u = (float)x / (float)neck_w;
-                float disp = sinf(u * (float)M_PI) * sinf((float)g_anim_tick * 0.85f + (float)str_idx * 1.3f) * env * 3.5f;
-                fill_rect(nut_x + x, sy + (int)roundf(disp), 1, thick, scol);
-            }
-        } else {
-            fill_rect(nut_x, sy, neck_w, thick, scol);
-        }
+        fill_rect(nut_x, sy, neck_w, thick, scol);
         draw_text(FONT_UI_16, 16, sy - 11, tn->row_lbl[r], RGB(186, 230, 253));
     }
 

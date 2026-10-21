@@ -24,8 +24,8 @@
  *          SELECT=310/314, START=311/315, L2=312, R2=313, MENU=316, D-Pad Hat/Keys.
  *        - Desktop X11 keys: A, B, X, Y, L/R (or [/]), 1/2, Tab, Enter, Arrows.
  *   4. Native 640x480 IPS Display Layout:
- *        - Live Now Playing / Next Chord cards with per-track VU meters
- *          (KICK, SNARE, HATS, BASS, COMP) and live Stereo Output Oscilloscope.
+ *        - Live Now Playing / Next Chord cards with chord tones and 4-bar
+ *          progression preview.
  *        - Full 12-Fret Rosewood Guitar Soloing Scale Map with anti-aliased
  *          Interval (`R, b3, 4, b5, 5, b7`) or Note Name (`A, C, D, Eb, E, G`)
  *          dots (toggled with `L2`).
@@ -68,7 +68,6 @@
 #define SAMPLE_RATE     44100
 #define AUDIO_CHANNELS  2
 #define AUDIO_FRAMES    256
-#define SCOPE_SAMPLES   512
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -581,8 +580,6 @@ typedef struct {
 } SynthState;
 
 static SynthState       g_synth;
-static int16_t          g_scope_buf[SCOPE_SAMPLES];
-static volatile uint32_t g_scope_write_idx = 0;
 
 static inline float midi_to_freq(int midi_note) {
     return 440.0f * powf(2.0f, (float)(midi_note - 69) / 12.0f);
@@ -897,10 +894,6 @@ static void audio_render_frames(int16_t *out, int frames) {
 
         out[f * 2 + 0] = (int16_t)il;
         out[f * 2 + 1] = (int16_t)ir;
-
-        uint32_t sw = g_scope_write_idx;
-        g_scope_buf[sw & (SCOPE_SAMPLES - 1)] = (int16_t)((il + ir) >> 1);
-        g_scope_write_idx = sw + 1;
     }
 
     /* Smooth decay of VU meters */
@@ -1413,7 +1406,7 @@ static void render_jam_view(void) {
     format_chord_label(g_key_pc, cur_bc, cur_chord_str, sizeof(cur_chord_str));
     format_chord_label(g_key_pc, next_bc, next_chord_str, sizeof(next_chord_str));
 
-    /* 1. Left Card: NOW PLAYING CHORD, BASS WALK & TRACK VU METERS (x=8..316, y=48..178) */
+    /* 1. Left Card: NOW PLAYING CHORD, CHORD TONES & BASS WALK (x=8..316, y=48..178) */
     int cy = 48, ch = 130;
     fill_rect(8, cy, 308, ch, RGB(21, 30, 48));
     draw_border(8, cy, 308, ch, 2, RGB(56, 189, 248));
@@ -1425,32 +1418,27 @@ static void render_jam_view(void) {
     draw_pill(232, cy + 6, 74, 24, RGB(146, 92, 12), RGB(250, 204, 21));
     draw_text_centered(FONT_UI_13, 232, cy + 6, 74, 24, cur_bc->roman, RGB(255, 255, 255));
 
-    /* Hero Chord Pill on Left + 5 Live Vertical VU Bars on Right of Left Card */
-    draw_pill(18, cy + 36, 136, 56, RGB(15, 23, 38), RGB(250, 204, 21));
-    draw_text_centered(FONT_TITLE_28, 18, cy + 36, 136, 56, cur_chord_str, RGB(250, 204, 21));
+    /* Hero Chord Pill on Left + Chord Tones Card on Right of Left Card */
+    draw_pill(18, cy + 36, 132, 56, RGB(15, 23, 38), RGB(250, 204, 21));
+    draw_text_centered(FONT_TITLE_28, 18, cy + 36, 132, 56, cur_chord_str, RGB(250, 204, 21));
 
-    /* 5 Per-Track Live VU Meters (KICK, SNR, HAT, BASS, COMP) */
-    float vus[5] = {
-        g_synth.vu_kick, g_synth.vu_snare, g_synth.vu_hat, g_synth.vu_bass, g_synth.vu_chord
-    };
-    static const char *k_vu_lbl[5] = { "KCK", "SNR", "HAT", "BAS", "CMP" };
-    static const uint32_t k_vu_col[5] = {
-        RGB(245, 158, 11), RGB(56, 189, 248), RGB(167, 139, 250), RGB(52, 211, 153), RGB(244, 114, 182)
-    };
-    for (int i = 0; i < 5; i++) {
-        int vx = 166 + i * 28;
-        int vy = cy + 36;
-        int vw = 22, vh = 40;
-        fill_rect(vx, vy, vw, vh, RGB(12, 18, 30));
-        draw_border(vx, vy, vw, vh, 1, RGB(45, 62, 92));
-        float lvl = vus[i];
-        if (lvl > 1.0f) lvl = 1.0f;
-        int fill_h = (int)(lvl * (float)(vh - 4));
-        if (fill_h > 0) {
-            fill_rect(vx + 2, vy + vh - 2 - fill_h, vw - 4, fill_h, k_vu_col[i]);
-        }
-        draw_text_centered(FONT_UI_11, vx - 2, vy + vh + 2, vw + 4, 14, k_vu_lbl[i], RGB(148, 163, 184));
+    int root_pc  = (g_key_pc + cur_bc->root_offset) % 12;
+    int third_pc = (root_pc + ((cur_bc->qual == CHQ_MIN || cur_bc->qual == CHQ_MIN7) ? 3 : 4)) % 12;
+    int fifth_pc = (root_pc + 7) % 12;
+    char tones_str[48];
+    if (cur_bc->qual == CHQ_DOM7 || cur_bc->qual == CHQ_MAJ7 || cur_bc->qual == CHQ_MIN7) {
+        int sev_pc = (root_pc + ((cur_bc->qual == CHQ_MAJ7) ? 11 : 10)) % 12;
+        snprintf(tones_str, sizeof(tones_str), "%s - %s - %s - %s",
+                 k_note_names[root_pc], k_note_names[third_pc],
+                 k_note_names[fifth_pc], k_note_names[sev_pc]);
+    } else {
+        snprintf(tones_str, sizeof(tones_str), "%s - %s - %s",
+                 k_note_names[root_pc], k_note_names[third_pc], k_note_names[fifth_pc]);
     }
+    fill_rect(158, cy + 36, 148, 56, RGB(15, 23, 38));
+    draw_border(158, cy + 36, 148, 56, 1, RGB(51, 68, 98));
+    draw_text_centered(FONT_UI_11, 158, cy + 42, 148, 16, "CHORD TONES", RGB(148, 163, 184));
+    draw_text_centered(FONT_UI_13, 158, cy + 62, 148, 22, tones_str, RGB(248, 250, 252));
 
     /* Active Bassline Sequence Strip at bottom of Left Card */
     char bass_seq[64] = "Bass Walk:  ";
@@ -1463,7 +1451,7 @@ static void render_jam_view(void) {
     }
     draw_text(FONT_UI_13, 18, cy + 100, bass_seq, RGB(110, 231, 183));
 
-    /* 2. Right Card: NEXT CHORD, 4-BAR PROGRESSION & LIVE OSCILLOSCOPE (x=324..632, y=48..178) */
+    /* 2. Right Card: NEXT CHORD & 4-BAR PROGRESSION (x=324..632, y=48..178) */
     fill_rect(324, cy, 308, ch, RGB(21, 30, 48));
     draw_border(324, cy, 308, ch, 2, RGB(51, 68, 98));
 
@@ -1471,26 +1459,6 @@ static void render_jam_view(void) {
     snprintf(next_hdr, sizeof(next_hdr), "NEXT (BAR %d): %s (%s)",
              next_bar + 1, next_chord_str, next_bc->roman);
     draw_text(FONT_UI_13, 334, cy + 8, next_hdr, RGB(250, 204, 21));
-
-    /* Live Stereo Output Waveform Scope in upper-right of Right Card */
-    int ox = 528, oy = cy + 6, ow = 96, oh = 44;
-    fill_rect(ox, oy, ow, oh, RGB(12, 18, 30));
-    draw_border(ox, oy, ow, oh, 1, RGB(45, 62, 92));
-    int mid_y = oy + oh / 2;
-    fill_rect(ox + 2, mid_y, ow - 4, 1, RGB(32, 46, 70));
-    uint32_t r_idx = g_scope_write_idx;
-    int prev_wy = mid_y;
-    for (int x = 2; x < ow - 2; x++) {
-        uint32_t s_idx = (r_idx - (uint32_t)((ow - 2 - x) * 2)) & (SCOPE_SAMPLES - 1);
-        int16_t samp = g_scope_buf[s_idx];
-        int wy = mid_y - (samp * (oh / 2 - 3)) / 18000;
-        if (wy < oy + 2)      wy = oy + 2;
-        if (wy > oy + oh - 3) wy = oy + oh - 3;
-        int y0 = (wy < prev_wy) ? wy : prev_wy;
-        int y1 = (wy > prev_wy) ? wy : prev_wy;
-        fill_rect(ox + x, y0, 1, y1 - y0 + 2, RGB(52, 211, 153));
-        prev_wy = wy;
-    }
 
     uint8_t cur_bass_deg = g_pattern[g_style_idx][TRK_BASS][g_cur_step % st->steps_per_bar];
     char b_pitch[32], b_line[64];

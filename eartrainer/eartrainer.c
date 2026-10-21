@@ -20,9 +20,8 @@
  *      - Full evdev button mapping (304=A, 305=B, 306=X, 307=Y, 308=L1, 309=R1,
  *        310/314=SELECT, 311/315=START, 312=L2, 313=R2) plus desktop keys.
  *   4. Rich 640x480 Visual Layout:
- *      - 12-fret 6-string rosewood guitar fretboard with real-time vibrating
- *        string animation, interval degree badges (R, 3, 5, 7), live audio
- *        oscilloscope waveform monitor, and 12 detailed answer cards.
+ *      - 12-fret 6-string rosewood guitar fretboard with interval degree
+ *        badges (R, 3, 5, 7), inspector card, and 12 detailed answer cards.
  */
 
 #include <stdio.h>
@@ -66,7 +65,6 @@
 #define AUDIO_CHANNELS  2
 #define NUM_ITEMS       12
 #define NUM_STRINGS     6
-#define SCOPE_SAMPLES   512
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -266,8 +264,6 @@ static float          g_chorus_lfo = 0.0f;
 
 /* Shared atomic visual telemetry for 60 FPS UI */
 static volatile float    g_string_env[NUM_STRINGS];
-static volatile int16_t  g_scope_buf[SCOPE_SAMPLES];
-static volatile uint32_t g_scope_write_idx = 0;
 
 static inline float rand_bipolar(void) {
     g_prng_state = g_prng_state * 1664525u + 1013904223u;
@@ -514,12 +510,6 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
         int16_t sr = (int16_t)out_r;
         out[i * 2 + 0] = sl;
         out[i * 2 + 1] = sr;
-
-        if ((i & 3) == 0) {
-            uint32_t sw = g_scope_write_idx;
-            g_scope_buf[sw & (SCOPE_SAMPLES - 1)] = (int16_t)((sl + sr) / 2);
-            g_scope_write_idx = sw + 1;
-        }
     }
 }
 
@@ -717,7 +707,8 @@ static struct fb_var_screeninfo g_vinfo;
 static struct fb_fix_screeninfo g_finfo;
 
 static pthread_t     g_alsa_thread;
-static volatile bool g_alsa_running = false;
+static volatile bool g_alsa_running   = false;
+static bool          g_use_sdl2_audio = false;
 
 typedef struct _snd_pcm snd_pcm_t;
 #define SND_PCM_STREAM_PLAYBACK 0
@@ -725,38 +716,44 @@ typedef struct _snd_pcm snd_pcm_t;
 
 static void *alsa_audio_worker(void *arg) {
     (void)arg;
+    int16_t buf[512 * AUDIO_CHANNELS];
     void *asound = dlopen("libasound.so.2", RTLD_LAZY);
-    if (!asound) return NULL;
-
-    int (*snd_open)(snd_pcm_t**, const char*, int, int) = dlsym(asound, "snd_pcm_open");
-    int (*snd_set_params)(snd_pcm_t*, int, int, unsigned int, unsigned int, int, unsigned int) = dlsym(asound, "snd_pcm_set_params");
-    long (*snd_writei)(snd_pcm_t*, const void*, unsigned long) = dlsym(asound, "snd_pcm_writei");
-    int (*snd_recover)(snd_pcm_t*, int, int) = dlsym(asound, "snd_pcm_recover");
-    int (*snd_close)(snd_pcm_t*) = dlsym(asound, "snd_pcm_close");
-
-    if (!snd_open || !snd_set_params || !snd_writei || !snd_close) {
-        dlclose(asound);
-        return NULL;
-    }
-
     snd_pcm_t *pcm = NULL;
-    if (snd_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
-        if (snd_open(&pcm, "plughw:0,0", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
-            dlclose(asound);
-            return NULL;
+    long (*snd_writei)(snd_pcm_t*, const void*, unsigned long) = NULL;
+    int (*snd_recover)(snd_pcm_t*, int, int) = NULL;
+    int (*snd_close)(snd_pcm_t*) = NULL;
+
+    if (asound) {
+        int (*snd_open)(snd_pcm_t**, const char*, int, int) = dlsym(asound, "snd_pcm_open");
+        int (*snd_set_params)(snd_pcm_t*, int, int, unsigned int, unsigned int, int, unsigned int) = dlsym(asound, "snd_pcm_set_params");
+        snd_writei  = dlsym(asound, "snd_pcm_writei");
+        snd_recover = dlsym(asound, "snd_pcm_recover");
+        snd_close   = dlsym(asound, "snd_pcm_close");
+
+        if (snd_open && snd_set_params && snd_writei && snd_close) {
+            if (snd_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0 &&
+                snd_open(&pcm, "plughw:0,0", SND_PCM_STREAM_PLAYBACK, 0) < 0 &&
+                snd_open(&pcm, "hw:0,0", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
+                pcm = NULL;
+            }
+            if (pcm) {
+                snd_set_params(pcm, SND_PCM_FORMAT_S16_LE, 3, AUDIO_CHANNELS, SAMPLE_RATE, 1, 40000);
+            }
         }
     }
-    snd_set_params(pcm, SND_PCM_FORMAT_S16_LE, 3, AUDIO_CHANNELS, SAMPLE_RATE, 1, 40000);
 
-    int16_t buf[512 * AUDIO_CHANNELS];
     while (g_alsa_running) {
         audio_callback(NULL, (uint8_t *)buf, sizeof(buf));
-        long r = snd_writei(pcm, buf, 512);
-        if (r < 0 && snd_recover) snd_recover(pcm, (int)r, 1);
+        if (pcm && snd_writei) {
+            long r = snd_writei(pcm, buf, 512);
+            if (r < 0 && snd_recover) snd_recover(pcm, (int)r, 1);
+        } else {
+            usleep(11600);
+        }
     }
 
-    snd_close(pcm);
-    dlclose(asound);
+    if (pcm && snd_close) snd_close(pcm);
+    if (asound) dlclose(asound);
     return NULL;
 }
 
@@ -805,7 +802,8 @@ static int platform_init(void) {
 
         if (fn_SDL_Init && fn_SDL_CreateWindow && fn_SDL_CreateRenderer &&
             fn_SDL_CreateTexture && fn_SDL_UpdateTexture && fn_SDL_RenderPresent) {
-            if (fn_SDL_Init(SDL2_INIT_VIDEO | SDL2_INIT_AUDIO) == 0) {
+            if (fn_SDL_Init(SDL2_INIT_VIDEO | SDL2_INIT_AUDIO) == 0 ||
+                fn_SDL_Init(SDL2_INIT_VIDEO) == 0) {
                 if (fn_SDL_ShowCursor) fn_SDL_ShowCursor(0);
                 g_sdl_win = fn_SDL_CreateWindow("EarTrainer",
                                                 SDL2_WINDOWPOS_UNDEF, SDL2_WINDOWPOS_UNDEF,
@@ -831,6 +829,7 @@ static int platform_init(void) {
                     desired.callback = audio_callback;
                     if (fn_SDL_OpenAudio(&desired, NULL) == 0) {
                         fn_SDL_PauseAudio(0);
+                        g_use_sdl2_audio = true;
                     }
                 }
             }
@@ -846,6 +845,8 @@ static int platform_init(void) {
                 g_fb_mem = (uint8_t *)mmap(NULL, g_fb_len, PROT_READ | PROT_WRITE, MAP_SHARED, g_fb_fd, 0);
             }
         }
+    }
+    if (!g_use_sdl2_audio) {
         g_alsa_running = true;
         pthread_create(&g_alsa_thread, NULL, alsa_audio_worker, NULL);
     }
@@ -1450,16 +1451,7 @@ static void render_fretboard_and_inspector(void) {
         uint32_t scol = (env > 0.05f) ? RGB(250, 204, 21) :
                         ((s < 3) ? RGB(205, 170, 120) : RGB(212, 220, 232));
         int thick = (s < 2) ? 2 : 1;
-
-        if (env > 0.04f) {
-            for (int x = 0; x < fb_w; x++) {
-                float u = (float)x / (float)fb_w;
-                float disp = sinf(u * (float)M_PI) * sinf((float)g_anim_tick * 0.8f + (float)s * 1.4f) * env * 3.0f;
-                fill_rect(fb_x + x, sy + (int)roundf(disp), 1, thick, scol);
-            }
-        } else {
-            fill_rect(fb_x, sy, fb_w, thick, scol);
-        }
+        fill_rect(fb_x, sy, fb_w, thick, scol);
     }
 
     int shown_idx = g_revealed ? g_audition_idx : g_correct_idx;
@@ -1514,7 +1506,7 @@ static void render_fretboard_and_inspector(void) {
     draw_circle_aa(root_cx, root_cy, 10.5f, 2.0f, RGB(234, 158, 12), RGB(254, 240, 138));
     draw_text_centered(FONT_UI_11, root_cx - 10, root_cy - 10, 20, 20, "R", RGB(20, 20, 20));
 
-    /* Right Inspector & Live Waveform Card (x = 406..632, y = 48..212) */
+    /* Right Inspector Card (x = 406..632, y = 48..212) */
     int ix = 406, iy = 48, iw = 226, ih = 164;
     fill_rect(ix, iy, iw, ih, RGB(21, 30, 48));
     uint32_t ibdr = g_revealed ? (g_solved ? RGB(16, 185, 129) : RGB(239, 68, 68)) : RGB(56, 78, 112);
@@ -1527,23 +1519,23 @@ static void render_fretboard_and_inspector(void) {
         char rline[48];
         snprintf(rline, sizeof(rline), "Root: %s  (Str %s, Fret %d)",
                  root_name, k_string_names[g_root_str], g_root_fret);
-        draw_text(FONT_UI_13, ix + 10, iy + 8, rline, RGB(250, 204, 21));
+        draw_text(FONT_UI_13, ix + 10, iy + 14, rline, RGB(250, 204, 21));
 
         const char *q_prompt = (g_mode == MODE_INTERVALS)
                                    ? (g_cur_is_desc ? "Identify Descending Int:" : "Identify Interval:")
                                    : "Identify Guitar Chord:";
-        draw_text(FONT_UI_16, ix + 10, iy + 30, q_prompt, RGB(248, 250, 252));
+        draw_text(FONT_UI_16, ix + 10, iy + 44, q_prompt, RGB(248, 250, 252));
 
         /* 3-Guess Remaining Pips */
-        draw_text(FONT_UI_13, ix + 10, iy + 58, "Tries Left:", RGB(148, 163, 184));
+        draw_text(FONT_UI_13, ix + 10, iy + 86, "Tries Left:", RGB(148, 163, 184));
         for (int g = 0; g < 3; g++) {
             bool avail = (g < g_guesses_left);
             uint32_t pfill = avail ? RGB(16, 185, 129) : RGB(185, 28, 28);
             uint32_t pbdr  = avail ? RGB(110, 231, 183) : RGB(252, 165, 165);
-            draw_pill(ix + 96 + g * 38, iy + 56, 32, 20, pfill, pbdr);
+            draw_pill(ix + 96 + g * 38, iy + 84, 32, 22, pfill, pbdr);
         }
 
-        draw_text(FONT_UI_11, ix + 10, iy + 84, "[B] Replay   |   [X] Hear Root", RGB(186, 230, 253));
+        draw_text(FONT_UI_11, ix + 10, iy + 128, "[B] Replay   |   [X] Hear Root", RGB(186, 230, 253));
     } else {
         const char *hdr = (shown_idx == g_correct_idx)
                               ? (g_solved ? "CORRECT! (+1 STREAK)" : "ANSWER REVEALED:")
@@ -1551,49 +1543,29 @@ static void render_fretboard_and_inspector(void) {
         uint32_t hcol = (shown_idx == g_correct_idx)
                             ? (g_solved ? RGB(52, 211, 153) : RGB(248, 113, 113))
                             : RGB(96, 165, 250);
-        draw_text(FONT_UI_13, ix + 10, iy + 6, hdr, hcol);
+        draw_text(FONT_UI_13, ix + 10, iy + 10, hdr, hcol);
 
         if (g_mode == MODE_INTERVALS) {
             const IntervalDef *id = &k_intervals[shown_idx];
-            draw_text(FONT_UI_20, ix + 10, iy + 24, id->full_name, RGB(255, 255, 255));
+            draw_text(FONT_UI_20, ix + 10, iy + 34, id->full_name, RGB(255, 255, 255));
 
             char t_name[16];
             format_midi_note(g_root_midi + id->semitones, t_name, sizeof(t_name));
             char nline[64];
             snprintf(nline, sizeof(nline), "%s -> %s  (%s)", root_name, t_name, id->sub_label);
-            draw_text(FONT_UI_13, ix + 10, iy + 52, nline, RGB(250, 204, 21));
-            draw_text(FONT_UI_13, ix + 10, iy + 72, id->mnemonic, RGB(147, 197, 253));
+            draw_text(FONT_UI_13, ix + 10, iy + 68, nline, RGB(250, 204, 21));
+            draw_text(FONT_UI_13, ix + 10, iy + 96, id->mnemonic, RGB(147, 197, 253));
         } else {
             const ChordDef *cd = &k_chords[shown_idx];
             char cname[48];
             snprintf(cname, sizeof(cname), "%s %s", k_note_names[g_root_midi % 12], cd->short_name);
-            draw_text(FONT_UI_20, ix + 10, iy + 24, cname, RGB(255, 255, 255));
-            draw_text(FONT_UI_13, ix + 10, iy + 52, cd->full_name, RGB(250, 204, 21));
+            draw_text(FONT_UI_20, ix + 10, iy + 34, cname, RGB(255, 255, 255));
+            draw_text(FONT_UI_13, ix + 10, iy + 68, cd->full_name, RGB(250, 204, 21));
             char fline[48];
             snprintf(fline, sizeof(fline), "Formula: %s", cd->formula);
-            draw_text(FONT_UI_13, ix + 10, iy + 72, fline, RGB(147, 197, 253));
+            draw_text(FONT_UI_13, ix + 10, iy + 96, fline, RGB(147, 197, 253));
         }
-        draw_text(FONT_UI_11, ix + 10, iy + 94, "[A] Next Question  |  [X] Compare", RGB(167, 243, 208));
-    }
-
-    /* Live Audio Waveform Scope at bottom of Inspector Card (y = iy + 114..iy + 156) */
-    int ox = ix + 10, oy = iy + 114, ow = iw - 20, oh = 42;
-    fill_rect(ox, oy, ow, oh, RGB(12, 18, 30));
-    draw_border(ox, oy, ow, oh, 1, RGB(45, 62, 92));
-    int mid_y = oy + oh / 2;
-    fill_rect(ox + 2, mid_y, ow - 4, 1, RGB(32, 46, 70));
-    uint32_t r_idx = g_scope_write_idx;
-    int prev_wy = mid_y;
-    for (int x = 2; x < ow - 2; x++) {
-        uint32_t s_idx = (r_idx - (uint32_t)((ow - 2 - x) * 2)) & (SCOPE_SAMPLES - 1);
-        int16_t samp = g_scope_buf[s_idx];
-        int wy = mid_y - (samp * (oh / 2 - 4)) / 9000;
-        if (wy < oy + 2)      wy = oy + 2;
-        if (wy > oy + oh - 3) wy = oy + oh - 3;
-        int y0 = (wy < prev_wy) ? wy : prev_wy;
-        int y1 = (wy > prev_wy) ? wy : prev_wy;
-        fill_rect(ox + x, y0, 1, y1 - y0 + 2, RGB(52, 211, 153));
-        prev_wy = wy;
+        draw_text(FONT_UI_11, ix + 10, iy + 130, "[A] Next Question  |  [X] Compare", RGB(167, 243, 208));
     }
 }
 
