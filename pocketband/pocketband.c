@@ -84,39 +84,9 @@ static void handle_sig(int sig) {
  * 1. UNIFIED INPUT BITMASKS (RG 35xxSP EVDEV + DESKTOP X11)
  * ============================================================================ */
 
-#undef BTN_UP
-#undef BTN_DOWN
-#undef BTN_LEFT
-#undef BTN_RIGHT
-#undef BTN_A
-#undef BTN_B
-#undef BTN_X
-#undef BTN_Y
-#undef BTN_L1
-#undef BTN_R1
-#undef BTN_L2
-#undef BTN_R2
-#undef BTN_SELECT
-#undef BTN_START
-#undef BTN_MENU
+#include "../rg35xxsp_input.h"
 #undef BTN_QUIT
-
-#define BTN_UP      (1u << 0)
-#define BTN_DOWN    (1u << 1)
-#define BTN_LEFT    (1u << 2)
-#define BTN_RIGHT   (1u << 3)
-#define BTN_A       (1u << 4)
-#define BTN_B       (1u << 5)
-#define BTN_X       (1u << 6)
-#define BTN_Y       (1u << 7)
-#define BTN_L1      (1u << 8)
-#define BTN_R1      (1u << 9)
-#define BTN_L2      (1u << 10)
-#define BTN_R2      (1u << 11)
-#define BTN_SELECT  (1u << 12)
-#define BTN_START   (1u << 13)
-#define BTN_MENU    (1u << 14)
-#define BTN_QUIT    (1u << 15)
+#define BTN_QUIT    (1u << 20)
 
 /* ============================================================================
  * 2. 640x480 SOFTWARE FRAMEBUFFER & ANTI-ALIASED DRAWING PRIMITIVES
@@ -1126,44 +1096,13 @@ static uint32_t platform_poll_pressed(void) {
         struct input_event ev;
         while (read(g_ev_fds[i], &ev, sizeof(ev)) == sizeof(ev)) {
             if (ev.type == EV_KEY) {
-                uint32_t mask = 0;
-                switch (ev.code) {
-                    case 304: mask = BTN_A;      break; /* RG 35xxSP East (A) */
-                    case 305: mask = BTN_B;      break; /* RG 35xxSP South (B) */
-                    case 306: mask = BTN_X;      break; /* RG 35xxSP North (X) */
-                    case 307: mask = BTN_Y;      break; /* RG 35xxSP West (Y) */
-                    case 308: mask = BTN_L1;     break; /* L1 */
-                    case 309: mask = BTN_R1;     break; /* R1 */
-                    case 310:
-                    case 314: mask = BTN_SELECT; break; /* SELECT */
-                    case 311:
-                    case 315: mask = BTN_START;  break; /* START */
-                    case 312: mask = BTN_L2;     break; /* L2 */
-                    case 313: mask = BTN_R2;     break; /* R2 */
-                    case 316: mask = BTN_MENU;   break; /* MENU */
-                    case KEY_UP:
-                    case BTN_DPAD_UP:    mask = BTN_UP;    break;
-                    case KEY_DOWN:
-                    case BTN_DPAD_DOWN:  mask = BTN_DOWN;  break;
-                    case KEY_LEFT:
-                    case BTN_DPAD_LEFT:  mask = BTN_LEFT;  break;
-                    case KEY_RIGHT:
-                    case BTN_DPAD_RIGHT: mask = BTN_RIGHT; break;
-                }
+                uint32_t mask = rg35xxsp_map_evkey(ev.code);
                 if (mask) {
                     if (ev.value > 0) g_held_btns |= mask;
                     else              g_held_btns &= ~mask;
                 }
             } else if (ev.type == EV_ABS) {
-                if (ev.code == ABS_HAT0X) {
-                    g_held_btns &= ~(BTN_LEFT | BTN_RIGHT);
-                    if (ev.value < 0)      g_held_btns |= BTN_LEFT;
-                    else if (ev.value > 0) g_held_btns |= BTN_RIGHT;
-                } else if (ev.code == ABS_HAT0Y) {
-                    g_held_btns &= ~(BTN_UP | BTN_DOWN);
-                    if (ev.value < 0)      g_held_btns |= BTN_UP;
-                    else if (ev.value > 0) g_held_btns |= BTN_DOWN;
-                }
+                g_held_btns = rg35xxsp_update_evabs(g_held_btns, ev.code, ev.value, 0, 0);
             }
         }
     }
@@ -1244,29 +1183,7 @@ static uint32_t platform_poll_pressed(void) {
             pressed |= BTN_QUIT;
         } else if (ev.type == KeyPress) {
             KeySym ks = XLookupKeysym(&ev.xkey, 0);
-            switch (ks) {
-                case XK_Up:           pressed |= BTN_UP;     break;
-                case XK_Down:         pressed |= BTN_DOWN;   break;
-                case XK_Left:         pressed |= BTN_LEFT;   break;
-                case XK_Right:        pressed |= BTN_RIGHT;  break;
-                case XK_a: case XK_A:
-                case XK_space:        pressed |= BTN_A;      break;
-                case XK_b: case XK_B: pressed |= BTN_B;      break;
-                case XK_x: case XK_X: pressed |= BTN_X;      break;
-                case XK_y: case XK_Y:
-                case XK_h: case XK_H: pressed |= BTN_Y;      break;
-                case XK_l: case XK_L:
-                case XK_bracketleft:  pressed |= BTN_L1;     break;
-                case XK_r: case XK_R:
-                case XK_bracketright: pressed |= BTN_R1;     break;
-                case XK_1:            pressed |= BTN_L2;     break;
-                case XK_2:            pressed |= BTN_R2;     break;
-                case XK_Tab:
-                case XK_BackSpace:    pressed |= BTN_SELECT; break;
-                case XK_Return:       pressed |= BTN_START;  break;
-                case XK_Escape:
-                case XK_q: case XK_Q: pressed |= BTN_QUIT;   break;
-            }
+            pressed |= rg35xxsp_map_x11_keysym(ks);
         }
     }
     return pressed;
@@ -1836,7 +1753,7 @@ static void render_help_modal(void) {
 
     fill_rect(mx + 4, my + mh - 32, mw - 8, 28, RGB(12, 18, 30));
     draw_text_centered(FONT_UI_13, mx, my + mh - 30, mw, 24,
-                       "Press [Y] or [B] to close Help  |  [START] Save & Exit",
+                       "Press [Y] or [B] to close Help  |  [MENU] Save & Exit",
                        RGB(186, 230, 253));
 }
 
@@ -1929,7 +1846,7 @@ int main(int argc, char *argv[]) {
 
     while (g_running) {
         uint32_t pressed = platform_poll_pressed();
-        if (pressed & (BTN_QUIT | BTN_START | BTN_MENU)) {
+        if (pressed & (BTN_QUIT | BTN_MENU)) {
             g_running = 0;
             break;
         }

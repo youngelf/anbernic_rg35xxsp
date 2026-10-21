@@ -86,39 +86,9 @@ static uint32_t g_fb[NATIVE_W * NATIVE_H];
  * 2. INPUT BUTTON BITMASKS (RG 35xxSP + X11 DESKTOP)
  * ============================================================================ */
 
-#undef BTN_UP
-#undef BTN_DOWN
-#undef BTN_LEFT
-#undef BTN_RIGHT
-#undef BTN_A
-#undef BTN_B
-#undef BTN_X
-#undef BTN_Y
-#undef BTN_L1
-#undef BTN_R1
-#undef BTN_L2
-#undef BTN_R2
-#undef BTN_SELECT
-#undef BTN_START
-#undef BTN_MENU
+#include "../rg35xxsp_input.h"
 #undef BTN_QUIT
-
-#define BTN_UP      (1u << 0)
-#define BTN_DOWN    (1u << 1)
-#define BTN_LEFT    (1u << 2)
-#define BTN_RIGHT   (1u << 3)
-#define BTN_A       (1u << 4)   /*RG35xxSP 304: Audition Scale / Strum / Pluck  */
-#define BTN_B       (1u << 5)   /*RG35xxSP 305: Toggle Skeleton / Arp / Lock    */
-#define BTN_X       (1u << 6)   /*RG35xxSP 306: Cycle Dot Labels (Int/Note/Deg) */
-#define BTN_Y       (1u << 7)   /*RG35xxSP 307: Help & Guitar Tuning Modal      */
-#define BTN_L1      (1u << 8)   /*RG35xxSP 308: Prev CAGED Box / Chord Voicing  */
-#define BTN_R1      (1u << 9)   /*RG35xxSP 309: Next CAGED Box / Chord Voicing  */
-#define BTN_L2      (1u << 10)  /*RG35xxSP 312: Cycle Timbre (Acoustic/El/Lead) */
-#define BTN_R2      (1u << 11)  /*RG35xxSP 313: Cycle 6 Guitar Tunings          */
-#define BTN_SELECT  (1u << 12)  /*RG35xxSP 310/314: Mode (SCALES/CHORDS/EXPLORE)*/
-#define BTN_START   (1u << 13)  /*RG35xxSP 311/315: Save & Exit                 */
-#define BTN_MENU    (1u << 14)  /*RG35xxSP 316: Save & Exit                     */
-#define BTN_QUIT    (1u << 15)
+#define BTN_QUIT    (1u << 20)
 
 /* ============================================================================
  * 3. MUSIC THEORY DATABASE: NOTES, TUNINGS, 14 SCALES & 12 CHORD QUALITIES
@@ -649,34 +619,7 @@ static void platform_present(void) {
 }
 
 static uint32_t map_x11_keysym(KeySym ks) {
-    switch (ks) {
-        case XK_Up:           return BTN_UP;
-        case XK_Down:         return BTN_DOWN;
-        case XK_Left:         return BTN_LEFT;
-        case XK_Right:        return BTN_RIGHT;
-        case XK_a: case XK_A:
-        case XK_space:
-        case XK_z: case XK_Z: return BTN_A;
-        case XK_b: case XK_B:
-        case XK_BackSpace:    return BTN_B;
-        case XK_x: case XK_X: return BTN_X;
-        case XK_y: case XK_Y:
-        case XK_h: case XK_H: return BTN_Y;
-        case XK_l: case XK_L:
-        case XK_q: case XK_Q:
-        case XK_bracketleft:  return BTN_L1;
-        case XK_r: case XK_R:
-        case XK_e: case XK_E:
-        case XK_bracketright: return BTN_R1;
-        case XK_1:            return BTN_L2;
-        case XK_2:            return BTN_R2;
-        case XK_Tab:
-        case XK_c: case XK_C: return BTN_SELECT;
-        case XK_Return:       return BTN_START;
-        case XK_Escape:
-        case XK_m: case XK_M: return BTN_MENU;
-        default:              return 0;
-    }
+    return rg35xxsp_map_x11_keysym(ks);
 }
 
 static uint32_t platform_poll_pressed(void) {
@@ -940,39 +883,13 @@ static uint32_t platform_poll_pressed(void) {
     for (int i = 0; i < g_num_ev_fds; i++) {
         while (read(g_ev_fds[i], &ev, sizeof(ev)) == (ssize_t)sizeof(ev)) {
             if (ev.type == EV_KEY) {
-                uint32_t bit = 0;
-                switch (ev.code) {
-                    case KEY_UP:    case BTN_DPAD_UP:    bit = BTN_UP;     break;
-                    case KEY_DOWN:  case BTN_DPAD_DOWN:  bit = BTN_DOWN;   break;
-                    case KEY_LEFT:  case BTN_DPAD_LEFT:  bit = BTN_LEFT;   break;
-                    case KEY_RIGHT: case BTN_DPAD_RIGHT: bit = BTN_RIGHT;  break;
-                    case 304:       case KEY_SPACE:      bit = BTN_A;      break;
-                    case 305:       case KEY_LEFTCTRL:   bit = BTN_B;      break;
-                    case 306:       case KEY_LEFTSHIFT:  bit = BTN_X;      break;
-                    case 307:       case KEY_LEFTALT:    bit = BTN_Y;      break;
-                    case 308:       case KEY_TAB:        bit = BTN_L1;     break;
-                    case 309:       case KEY_BACKSPACE:  bit = BTN_R1;     break;
-                    case 310:       case 314:            bit = BTN_SELECT; break;
-                    case 311:       case 315:            bit = BTN_START;  break;
-                    case 312:                            bit = BTN_L2;     break;
-                    case 313:                            bit = BTN_R2;     break;
-                    case 316:       case KEY_ESC:        bit = BTN_MENU;   break;
-                    default: break;
-                }
+                uint32_t bit = rg35xxsp_map_evkey(ev.code);
                 if (bit) {
                     if (ev.value > 0) g_held_mask |= bit;
                     else              g_held_mask &= ~bit;
                 }
             } else if (ev.type == EV_ABS) {
-                if (ev.code == ABS_HAT0X || ev.code == ABS_X) {
-                    g_held_mask &= ~(BTN_LEFT | BTN_RIGHT);
-                    if (ev.value < 0)      g_held_mask |= BTN_LEFT;
-                    else if (ev.value > 0) g_held_mask |= BTN_RIGHT;
-                } else if (ev.code == ABS_HAT0Y || ev.code == ABS_Y) {
-                    g_held_mask &= ~(BTN_UP | BTN_DOWN);
-                    if (ev.value < 0)      g_held_mask |= BTN_UP;
-                    else if (ev.value > 0) g_held_mask |= BTN_DOWN;
-                }
+                g_held_mask = rg35xxsp_update_evabs(g_held_mask, ev.code, ev.value, 0, 0);
             }
         }
     }
@@ -2018,7 +1935,7 @@ static void render_help_modal(void) {
         { "X Button",     "Cycle Dot Labels: Intervals (R,b3) -> Notes -> Degrees" },
         { "L1 / R1",      "Cycle 5 CAGED Boxes (POS 1..5) or 5 Chord Voicings" },
         { "L2 / R2",      "L2: Timbre (Acoustic/Chorus/Lead) | R2: Cycle 6 Tunings" },
-        { "DPAD / START", "U/D: Root Key | L/R: Scale/Chord | START: Save & Exit" }
+        { "DPAD / MENU",  "U/D: Root Key | L/R: Scale/Chord | MENU: Save & Exit" }
     };
 
     for (int i = 0; i < 7; i++) {
@@ -2135,7 +2052,7 @@ int main(int argc, char *argv[]) {
 
     while (g_running) {
         uint32_t pressed = platform_poll_pressed();
-        if (pressed & (BTN_QUIT | BTN_START | BTN_MENU)) {
+        if (pressed & (BTN_QUIT | BTN_MENU)) {
             g_running = 0;
             break;
         }

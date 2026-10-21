@@ -5,14 +5,13 @@
  *   3. Linux Host (x86_64) - 640x480 X11 window for quick desktop debugging
  *
  * Controls:
- *   A Button (or 'A')               : Toggle Start / Stop (Pause) timer
- *   X Button (or 'X')               : Switch mode (Work <-> Short Break <-> Long Break)
- *   B Button (or 'B')               : Stop / Pause timer
- *   Y Button (or 'Y' / 'R' / Space) : Reset current session timer
+ *   A Button (or 'A' / Space)       : Toggle Start / Pause timer (Primary Action)
+ *   B / X Button (or 'B' / 'X')     : Reset current session timer (Secondary Action)
+ *   SELECT or LEFT / RIGHT          : Switch mode (Work <-> Short Break <-> Long Break)
+ *   Y Button (or 'Y')               : Toggle Help overlay
  *   UP / DOWN or R1 / L1            : Adjust current mode duration (+/- 1 min when stopped)
  *   R2 / L2                         : Adjust current mode duration (+/- 5 min when stopped)
- *   LEFT / RIGHT                    : Cycle mode backward / forward
- *   SELECT / MENU (or Esc / 'Q')    : Save & Exit
+ *   MENU (or Esc)                   : Save & Exit
  */
 
 #include <stdio.h>
@@ -26,6 +25,10 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+
+#if defined(HOST_X11) || defined(TARGET_RG35XXSP)
+#include "../rg35xxsp_input.h"
+#endif
 
 #define SCREEN_W 320
 #define SCREEN_H 240
@@ -202,6 +205,25 @@ static void SDL_CloseAudio(void) {}
 #define SDLK_q          XK_q
 #define SDLK_m          XK_m
 
+static SDLKey mask_to_sdlkey(uint32_t mask) {
+    if (mask & BTN_MENU)      return SDLK_RCTRL;      /* V90_BTN_RESET (Menu Quit) */
+    if (mask & BTN_SELECT)    return SDLK_ESCAPE;     /* V90_BTN_SELECT (Modal Shift) */
+    if (mask & BTN_START)     return SDLK_RETURN;     /* V90_BTN_START */
+    if (mask & BTN_A)         return SDLK_LALT;       /* V90_BTN_A (Start/Pause) */
+    if (mask & BTN_B)         return SDLK_LCTRL;      /* V90_BTN_B (Reset Timer) */
+    if (mask & BTN_X)         return SDLK_LSHIFT;     /* V90_BTN_X (Reset Timer) */
+    if (mask & BTN_Y)         return SDLK_SPACE;      /* V90_BTN_Y (Help) */
+    if (mask & BTN_L1)        return SDLK_TAB;        /* V90_BTN_L1 (-1 min) */
+    if (mask & BTN_R1)        return SDLK_BACKSPACE;  /* V90_BTN_R1 (+1 min) */
+    if (mask & BTN_L2)        return SDLK_PAGEUP;     /* V90_BTN_L2 (-5 min) */
+    if (mask & BTN_R2)        return SDLK_PAGEDOWN;   /* V90_BTN_R2 (+5 min) */
+    if (mask & BTN_UP)        return SDLK_UP;
+    if (mask & BTN_DOWN)      return SDLK_DOWN;
+    if (mask & BTN_LEFT)      return SDLK_LEFT;
+    if (mask & BTN_RIGHT)     return SDLK_RIGHT;
+    return SDLK_UNKNOWN;
+}
+
 static Display *g_x11_dpy = NULL;
 static Window g_x11_win = 0;
 static GC g_x11_gc = 0;
@@ -314,11 +336,11 @@ static int SDL_PollEvent(SDL_Event *ev) {
                 }
             }
             KeySym ks = XLookupKeysym(&xev.xkey, 0);
-            if (ks >= XK_A && ks <= XK_Z) {
-                ks = ks - XK_A + XK_a;
-            }
+            uint32_t mask = rg35xxsp_map_x11_keysym((unsigned long)ks);
+            SDLKey sym = mask_to_sdlkey(mask);
+            if (sym == SDLK_UNKNOWN) continue;
             ev->type = (xev.type == KeyPress) ? SDL_KEYDOWN : SDL_KEYUP;
-            ev->key.keysym.sym = (SDLKey)ks;
+            ev->key.keysym.sym = sym;
             return 1;
         }
     }
@@ -678,88 +700,24 @@ static void SDL_Flip(SDL_Surface *screen) {
 }
 
 static SDLKey translate_rg35xxsp_key(uint16_t code) {
-    /*
-     * Unified Anbernic RG35XXSP button mapping across all firmwares:
-     *
-     * 1) Raw Allwinner H700 ANBERNIC-keys device tree:
-     *    keyA     = 304 (BTN_SOUTH)
-     *    keyB     = 305 (BTN_EAST)
-     *    keyX     = 306 (BTN_C)
-     *    keyY     = 307 (BTN_NORTH)
-     *    keyL1    = 308 (BTN_WEST)
-     *    keyR1    = 309 (BTN_Z)
-     *    keySEl   = 310 (BTN_TL)      -> Select (Save & Exit)
-     *    keyStart = 311 (BTN_TR)      -> Start
-     *    keyMenu  = 312 (BTN_TL2)     -> Menu   (Save & Exit)
-     *    keyL2    = 314 (BTN_SELECT)  -> Select on Knulli/Batocera (Save & Exit)
-     *    keyR2    = 315 (BTN_START)
-     *
-     * 2) Knulli (Scarab / Batocera) / MuOS / Stock OS / standard Linux gamepad:
-     *    BTN_SELECT (314), BTN_MODE (316), BTN_TL (310), BTN_TL2 (312),
-     *    BTN_TR2 (313), BTN_TRIGGER_HAPPY1..6 (704..709), KEY_MENU (139),
-     *    KEY_HOMEPAGE (172), KEY_SELECT (353), KEY_ESC (1) -> Save & Exit.
-     */
-    switch (code) {
-        case 304: return SDLK_LALT;      /* Physical A: Start / Stop */
-        case 305: return SDLK_LCTRL;     /* Physical B: Stop / Pause */
-        case 306: return SDLK_LSHIFT;    /* Physical X: Switch Mode */
-        case 307: return SDLK_SPACE;     /* Physical Y: Reset Timer */
-        case 308: return SDLK_TAB;       /* Physical L1: -1 min */
-        case 309: return SDLK_BACKSPACE; /* Physical R1: +1 min */
-        case 310: return SDLK_ESCAPE;    /* Physical SELECT (H700 keySEl / BTN_TL): Save & Exit */
-        case 311: return SDLK_RETURN;    /* Physical START (H700 keyStart / BTN_TR) */
-        case 312: return SDLK_ESCAPE;    /* Physical MENU (H700 keyMenu / BTN_TL2): Save & Exit */
-        case 313: return SDLK_ESCAPE;    /* BTN_TR2 / Mode fallback: Save & Exit */
-        case 314: return SDLK_ESCAPE;    /* BTN_SELECT (Select on Knulli/Batocera): Save & Exit */
-        case 315: return SDLK_RETURN;    /* BTN_START (Start on Knulli/Batocera) */
-        case 316: return SDLK_ESCAPE;    /* BTN_MODE (Menu M button): Save & Exit */
-        case 294:                        /* BTN_BASE (Select on some sunxi joypads) */
-        case 295:                        /* BTN_BASE2 */
-        case 296:                        /* BTN_BASE3 (Select) */
-        case 297:                        /* BTN_BASE4 */
-        case 298:                        /* BTN_BASE5 (Menu) */
-        case 299:                        /* BTN_BASE6 (Menu) */
-        case 704:                        /* BTN_TRIGGER_HAPPY1 (Menu/Select on Batocera/Knulli) */
-        case 705:                        /* BTN_TRIGGER_HAPPY2 */
-        case 706:                        /* BTN_TRIGGER_HAPPY3 */
-        case 707:                        /* BTN_TRIGGER_HAPPY4 */
-        case 708:                        /* BTN_TRIGGER_HAPPY5 */
-        case 709: return SDLK_ESCAPE;    /* BTN_TRIGGER_HAPPY6 */
-        default:  break;
-    }
-
-    /* Keyboard / D-Pad / System hotkeys (including Batocera evmapy Alt+F4 & SP Lid Close) */
-    switch (code) {
-        case KEY_UP:
-        case BTN_DPAD_UP:    return SDLK_UP;
-        case KEY_DOWN:
-        case BTN_DPAD_DOWN:  return SDLK_DOWN;
-        case KEY_LEFT:
-        case BTN_DPAD_LEFT:  return SDLK_LEFT;
-        case KEY_RIGHT:
-        case BTN_DPAD_RIGHT: return SDLK_RIGHT;
-        case KEY_A:          return SDLK_a;
-        case KEY_B:          return SDLK_b;
-        case KEY_X:          return SDLK_x;
-        case KEY_Y:          return SDLK_y;
-        case KEY_R:          return SDLK_r;
-        case KEY_SPACE:      return SDLK_SPACE;
-        case KEY_ENTER:      return SDLK_RETURN;
-        case KEY_ESC:
-        case KEY_Q:
-        case KEY_M:
-        case KEY_F1:
-        case KEY_F4:
-        case KEY_MENU:       /* 139 */
-        case KEY_HOMEPAGE:   /* 172 */
-        case KEY_PROG1:      /* 148 */
-        case KEY_PROG2:      /* 149 */
-        case KEY_SELECT:     /* 353 */
-        case KEY_BACK:       /* 158 */
-            return SDLK_ESCAPE;
-        case KEY_INSERT:     return SDLK_LID_CLOSE; /* RG35XXSP Hall sensor lid close */
-        default:             return SDLK_UNKNOWN;
-    }
+    uint32_t mask = rg35xxsp_map_evkey(code);
+    if (mask & BTN_LID_CLOSE) return SDLK_LID_CLOSE;
+    if (mask & BTN_MENU)      return SDLK_RCTRL;      /* V90_BTN_RESET (Menu Quit) */
+    if (mask & BTN_SELECT)    return SDLK_ESCAPE;     /* V90_BTN_SELECT (Modal Shift) */
+    if (mask & BTN_START)     return SDLK_RETURN;     /* V90_BTN_START */
+    if (mask & BTN_A)         return SDLK_LALT;       /* V90_BTN_A (Start/Pause) */
+    if (mask & BTN_B)         return SDLK_LCTRL;      /* V90_BTN_B (Reset Timer) */
+    if (mask & BTN_X)         return SDLK_LSHIFT;     /* V90_BTN_X (Reset Timer) */
+    if (mask & BTN_Y)         return SDLK_SPACE;      /* V90_BTN_Y (Help) */
+    if (mask & BTN_L1)        return SDLK_TAB;        /* V90_BTN_L1 (-1 min) */
+    if (mask & BTN_R1)        return SDLK_BACKSPACE;  /* V90_BTN_R1 (+1 min) */
+    if (mask & BTN_L2)        return SDLK_PAGEUP;     /* V90_BTN_L2 (-5 min) */
+    if (mask & BTN_R2)        return SDLK_PAGEDOWN;   /* V90_BTN_R2 (+5 min) */
+    if (mask & BTN_UP)        return SDLK_UP;
+    if (mask & BTN_DOWN)      return SDLK_DOWN;
+    if (mask & BTN_LEFT)      return SDLK_LEFT;
+    if (mask & BTN_RIGHT)     return SDLK_RIGHT;
+    return SDLK_UNKNOWN;
 }
 
 static int SDL_PollEvent(SDL_Event *ev) {
@@ -1252,8 +1210,14 @@ static int get_mode_duration(TimerMode mode) {
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    bool dump_promo_mode = false;
+    const char *dump_prefix = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--dump-promo") == 0 && i + 1 < argc) {
+            dump_promo_mode = true;
+            dump_prefix = argv[++i];
+        }
+    }
 
     signal(SIGINT,  handle_quit_signal);
     signal(SIGTERM, handle_quit_signal);
@@ -1263,42 +1227,53 @@ int main(int argc, char *argv[]) {
     resolve_save_paths();
     load_stats();
 
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_JOYSTICK) < 0) {
-        fprintf(stderr, "Failed to initialize video: %s\n", SDL_GetError());
-        return 1;
-    }
-
-    /* Optional audio initialization (don't fail if audio device is busy/unavailable) */
+    SDL_Surface *screen = NULL;
+    SDL_Surface dummy_screen = {0};
     bool audio_ok = false;
-    if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
-        SDL_AudioSpec desired, obtained;
-        memset(&desired, 0, sizeof(desired));
-        desired.freq = 22050;
-        desired.format = AUDIO_S16SYS;
-        desired.channels = 1;
-        desired.samples = 512;
-        desired.callback = audio_callback;
-        if (SDL_OpenAudio(&desired, &obtained) == 0) {
-            SDL_PauseAudio(0);
-            audio_ok = true;
-        }
-    }
 
-    SDL_ShowCursor(SDL_DISABLE);
-    if (SDL_NumJoysticks() > 0) {
-        SDL_JoystickOpen(0);
-    }
-
-    SDL_Surface *screen = SDL_SetVideoMode(SCREEN_W, SCREEN_H, SCREEN_BPP, SDL_SWSURFACE);
-    if (!screen) {
-        screen = SDL_SetVideoMode(SCREEN_W, SCREEN_H, 0, SDL_SWSURFACE);
-        if (!screen) {
-            fprintf(stderr, "Failed to set video mode: %s\n", SDL_GetError());
-            SDL_Quit();
+    if (!dump_promo_mode) {
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_JOYSTICK) < 0) {
+            fprintf(stderr, "Failed to initialize video: %s\n", SDL_GetError());
             return 1;
         }
+
+        /* Optional audio initialization (don't fail if audio device is busy/unavailable) */
+        if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
+            SDL_AudioSpec desired, obtained;
+            memset(&desired, 0, sizeof(desired));
+            desired.freq = 22050;
+            desired.format = AUDIO_S16SYS;
+            desired.channels = 1;
+            desired.samples = 512;
+            desired.callback = audio_callback;
+            if (SDL_OpenAudio(&desired, &obtained) == 0) {
+                SDL_PauseAudio(0);
+                audio_ok = true;
+            }
+        }
+
+        SDL_ShowCursor(SDL_DISABLE);
+        if (SDL_NumJoysticks() > 0) {
+            SDL_JoystickOpen(0);
+        }
+
+        screen = SDL_SetVideoMode(SCREEN_W, SCREEN_H, SCREEN_BPP, SDL_SWSURFACE);
+        if (!screen) {
+            screen = SDL_SetVideoMode(SCREEN_W, SCREEN_H, 0, SDL_SWSURFACE);
+            if (!screen) {
+                fprintf(stderr, "Failed to set video mode: %s\n", SDL_GetError());
+                SDL_Quit();
+                return 1;
+            }
+        }
+        SDL_WM_SetCaption("Pomodoro Timer", NULL);
+    } else {
+        dummy_screen.w = SCREEN_W * UI_SCALE;
+        dummy_screen.h = SCREEN_H * UI_SCALE;
+        dummy_screen.format = &g_dummy_fmt;
+        dummy_screen.pixels = (Uint32 *)calloc((size_t)dummy_screen.w * dummy_screen.h, sizeof(Uint32));
+        screen = &dummy_screen;
     }
-    SDL_WM_SetCaption("Pomodoro Timer", NULL);
 
     /* Colors */
     Uint32 col_bg          = SDL_MapRGB(screen->format, 18, 22, 31);
@@ -1324,20 +1299,17 @@ int main(int argc, char *argv[]) {
     Uint32 accum_ms = 0;
     int unsaved_work_sec = 0;
 
-    bool select_held = false;
-    bool start_held = false;
     bool running = true;
+    bool show_help = false;
 
     while (running && !g_sig_quit) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
+        if (!dump_promo_mode) {
+            SDL_Event ev;
+            while (SDL_PollEvent(&ev)) {
             if (ev.type == SDL_QUIT) {
                 running = false;
             } else if (ev.type == SDL_KEYDOWN) {
                 SDLKey k = ev.key.keysym.sym;
-
-                if (k == V90_BTN_SELECT) select_held = true;
-                if (k == V90_BTN_START)  start_held = true;
 
 #if defined(TARGET_RG35XXSP)
                 /* Clamshell lid closed: flush stats immediately to SD card */
@@ -1348,12 +1320,27 @@ int main(int argc, char *argv[]) {
                 }
 #endif
 
-                /* A Button (or 'A'/Space on keyboard): Toggle Start / Stop */
-#ifdef HOST_X11
-                if (k == V90_BTN_A || k == SDLK_a || k == SDLK_SPACE) {
-#else
+                /* MENU (or Esc on Desktop): Save and exit */
+                if (k == V90_BTN_RESET) {
+                    running = false;
+                    break;
+                }
+
+                /* Y Button: Toggle Help overlay */
+                if (k == V90_BTN_Y || k == SDLK_y) {
+                    show_help = !show_help;
+                    continue;
+                }
+
+                if (show_help) {
+                    if (k == V90_BTN_A || k == SDLK_a || k == V90_BTN_B || k == SDLK_b) {
+                        show_help = false;
+                    }
+                    continue;
+                }
+
+                /* A Button: Primary Action — Toggle Start / Pause */
                 if (k == V90_BTN_A || k == SDLK_a) {
-#endif
                     if (status == STATUS_RUNNING) {
                         status = STATUS_PAUSED;
                         save_stats();
@@ -1373,20 +1360,17 @@ int main(int argc, char *argv[]) {
                         last_tick_ms = SDL_GetTicks();
                     }
                 }
-                /* B Button (or 'B' on keyboard): Stop / Pause timer */
-                else if (k == V90_BTN_B || k == SDLK_b) {
-                    if (status == STATUS_RUNNING) {
-                        status = STATUS_PAUSED;
-                        save_stats();
-                        unsaved_work_sec = 0;
-                    } else if (status == STATUS_DONE) {
-                        status = STATUS_READY;
-                        total_phase_sec = get_mode_duration(mode);
-                        remaining_sec = total_phase_sec;
-                    }
+                /* B or X Button: Secondary Action — Reset current timer */
+                else if (k == V90_BTN_B || k == SDLK_b || k == V90_BTN_X || k == SDLK_x) {
+                    status = STATUS_READY;
+                    total_phase_sec = get_mode_duration(mode);
+                    remaining_sec = total_phase_sec;
+                    accum_ms = 0;
+                    save_stats();
+                    unsaved_work_sec = 0;
                 }
-                /* X Button or D-Pad LEFT/RIGHT: Switch mode */
-                else if (k == V90_BTN_X || k == SDLK_x || k == V90_BTN_LEFT || k == V90_BTN_RIGHT) {
+                /* SELECT or D-Pad LEFT/RIGHT: Modal shift (Work <-> Short Break <-> Long Break) */
+                else if (k == V90_BTN_SELECT || k == V90_BTN_LEFT || k == V90_BTN_RIGHT) {
                     save_stats();
                     unsaved_work_sec = 0;
                     if (k == V90_BTN_LEFT) {
@@ -1398,15 +1382,6 @@ int main(int argc, char *argv[]) {
                     total_phase_sec = get_mode_duration(mode);
                     remaining_sec = total_phase_sec;
                     accum_ms = 0;
-                }
-                /* Y Button (or 'Y'/'R'/Space on keyboard): Reset current timer */
-                else if (k == V90_BTN_Y || k == SDLK_y || k == SDLK_r) {
-                    status = STATUS_READY;
-                    total_phase_sec = get_mode_duration(mode);
-                    remaining_sec = total_phase_sec;
-                    accum_ms = 0;
-                    save_stats();
-                    unsaved_work_sec = 0;
                 }
                 /* UP / DOWN or Shoulder Buttons (L1/R1 = +/-1m, L2/R2 = +/-5m): Adjust duration when not running */
                 else if ((k == V90_BTN_UP || k == V90_BTN_DOWN ||
@@ -1437,14 +1412,6 @@ int main(int argc, char *argv[]) {
                     accum_ms = 0;
                     save_stats();
                 }
-                /* SELECT / MENU (or Q / M): Save and exit */
-                else if (k == V90_BTN_SELECT || k == V90_BTN_RESET || k == SDLK_q || k == SDLK_m) {
-                    running = false;
-                }
-            } else if (ev.type == SDL_KEYUP) {
-                SDLKey k = ev.key.keysym.sym;
-                if (k == V90_BTN_SELECT) select_held = false;
-                if (k == V90_BTN_START)  start_held = false;
             } else if (ev.type == SDL_JOYBUTTONDOWN) {
                 /* Fallback if SDL joystick events are emitted */
                 if (ev.jbutton.button == 1 || ev.jbutton.button == 0) {
@@ -1457,18 +1424,27 @@ int main(int argc, char *argv[]) {
                             status = STATUS_RUNNING;
                             last_tick_ms = SDL_GetTicks();
                         }
-                    } else { /* B: Stop */
-                        if (status == STATUS_RUNNING) {
-                            status = STATUS_PAUSED;
-                            save_stats();
-                        }
+                    } else { /* B: Reset */
+                        status = STATUS_READY;
+                        total_phase_sec = get_mode_duration(mode);
+                        remaining_sec = total_phase_sec;
+                        accum_ms = 0;
+                        save_stats();
+                        unsaved_work_sec = 0;
                     }
                 }
             }
         }
-
-        if (select_held && start_held) {
-            running = false;
+        } else {
+            mode = MODE_WORK;
+            status = STATUS_RUNNING;
+            total_phase_sec = 25 * 60;
+            remaining_sec = 18 * 60 + 42;
+            g_stats.total_work_seconds = 14 * 3600 + 25 * 60;
+            g_stats.today_work_seconds = 2 * 3600 + 15 * 60;
+            g_stats.total_pomodoros = 34;
+            g_stats.today_pomodoros = 5;
+            current_session_work_sec = 6 * 60 + 18;
         }
 
         /* Update Timer */
@@ -1652,24 +1628,67 @@ int main(int argc, char *argv[]) {
         draw_rect(screen, 0, 214, SCREEN_W, 26, col_header);
         draw_rect(screen, 0, 214, SCREEN_W, 1, col_border);
 
-        /* Highlight A (Start/Stop) and X (Mode) button hints */
+        /* Highlight A (Start/Pause), B (Reset), SELECT (Mode), Y (Help), MENU (Exit) */
         Uint32 a_btn_col = (status == STATUS_RUNNING) ? col_paused : col_running;
-        draw_rect(screen, 8, 220, 96, 14, a_btn_col);
-        draw_text_centered(screen, 56, 224, "[A] START/STOP", 1, col_bg);
+        draw_rect(screen, 6, 220, 86, 14, a_btn_col);
+        draw_text_centered(screen, 49, 224, "A:START/PAUSE", 1, col_bg);
 
-        draw_rect(screen, 110, 220, 62, 14, col_break);
-        draw_text_centered(screen, 141, 224, "[X] MODE", 1, col_white);
+        draw_rect(screen, 96, 220, 56, 14, col_break);
+        draw_text_centered(screen, 124, 224, "SEL:MODE", 1, col_white);
 
-        draw_text(screen, 180, 224, "[Y]RST [M/SEL]EXIT", 1, col_white);
+        draw_text(screen, 158, 224, "B:RST  Y:HELP  MENU:EXIT", 1, col_white);
+
+        /* 6. Help Modal Overlay (toggled with Y) */
+        if (show_help) {
+            draw_rect(screen, 14, 18, 292, 204, col_header);
+            draw_border(screen, 14, 18, 292, 204, 2, col_gold);
+            draw_rect(screen, 16, 20, 288, 24, col_panel);
+            draw_text_centered(screen, SCREEN_W / 2, 25, "POMODORO CONTROLS", 2, col_gold);
+
+            draw_text(screen, 26,  54, "A BUTTON      : START / PAUSE TIMER", 1, col_white);
+            draw_text(screen, 26,  70, "B / X BUTTON  : RESET CURRENT PHASE", 1, col_white);
+            draw_text(screen, 26,  86, "SELECT / L/R  : SWITCH WORK / BREAK", 1, col_break);
+            draw_text(screen, 26, 102, "UP/DN / L1/R1 : DURATION +/- 1 MIN", 1, col_running);
+            draw_text(screen, 26, 118, "L2 / R2       : DURATION +/- 5 MIN", 1, col_running);
+            draw_text(screen, 26, 134, "Y BUTTON      : TOGGLE HELP OVERLAY", 1, col_muted);
+            draw_text(screen, 26, 150, "MENU (ESC)    : SAVE STATS & EXIT", 1, col_work);
+
+            draw_rect(screen, 26, 184, 268, 24, col_panel);
+            draw_border(screen, 26, 184, 268, 24, 1, col_border);
+            draw_text_centered(screen, SCREEN_W / 2, 193, "PRESS Y, A, OR B TO CLOSE", 1, col_gold);
+        }
+
+        if (dump_promo_mode && dump_prefix) {
+            int out_w = 640, out_h = 480;
+            Uint32 *scaled = (Uint32 *)calloc((size_t)out_w * out_h, sizeof(Uint32));
+            for (int y = 0; y < out_h; y++) {
+                int sy = (y * screen->h) / out_h;
+                for (int x = 0; x < out_w; x++) {
+                    int sx = (x * screen->w) / out_w;
+                    scaled[y * out_w + x] = screen->pixels[sy * screen->w + sx];
+                }
+            }
+            FILE *df = fopen(dump_prefix, "wb");
+            if (df) {
+                fwrite(scaled, sizeof(Uint32), (size_t)out_w * out_h, df);
+                fclose(df);
+            }
+            free(scaled);
+            break;
+        }
 
         SDL_Flip(screen);
         SDL_Delay(50); /* ~20 FPS to save battery */
     }
 
-    save_stats();
-    if (audio_ok) {
-        SDL_CloseAudio();
+    if (!dump_promo_mode) {
+        save_stats();
+        if (audio_ok) {
+            SDL_CloseAudio();
+        }
+        SDL_Quit();
+    } else {
+        free(dummy_screen.pixels);
     }
-    SDL_Quit();
     return 0;
 }

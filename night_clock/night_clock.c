@@ -11,7 +11,7 @@
  * Features:
  *   - Retains the top-screen clock functionality (no date display):
  *     * 24-Hour Retro LED Dot-Matrix Digital Clock (HH:MM, constant colon, no seconds)
- *     * Minimalist High-Contrast Analog Clock (toggled with X)
+ *     * Minimalist High-Contrast Analog Clock (toggled with SELECT or X)
  *     * 10-Minute IPS Anti-Burn-In Orbit around the 640x480 center
  *   - Local Timezone Shift (D-Pad LEFT / RIGHT in +/-30m steps, displayed as TZ +/-HH:MM,
  *     persisted across reboots in .night_clock.cfg)
@@ -19,9 +19,11 @@
  *   - Volume Level Indicator & Confirmation (VOL+ / VOL-, levels 0..10, shows on-screen
  *     volume bar and plays confirmation alarm tone at that volume when released)
  *   - Single-Screen Alarm Editor (Press A to open on screen; press A again to save,
- *     play confirmation alarm sound, and resume the clock; press B to disable/cancel)
- *   - Single-Screen Controls / Help View (Press R1 to view controls on screen;
- *     press R1 again to resume the clock)
+ *     play confirmation alarm sound, and resume the clock; press B to disable/cancel;
+ *     in normal clock view, press B to quick-toggle Alarm ON/OFF)
+ *   - Single-Screen Controls / Help View (Press Y to view controls on screen;
+ *     press Y, A, or B to resume the clock)
+ *   - Exit: Press MENU (Esc on Desktop) to save configuration and exit
  */
 
 #include <stdio.h>
@@ -39,6 +41,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "../rg35xxsp_input.h"
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
@@ -55,25 +59,6 @@
 
 #define COLOR_BLACK   RGB_COLOR(0, 0, 0)
 #define COLOR_WHITE   RGB_COLOR(255, 255, 255)
-
-/* Logical button bitmask */
-#define BTN_UP        (1u << 0)
-#define BTN_DOWN      (1u << 1)
-#define BTN_LEFT      (1u << 2)
-#define BTN_RIGHT     (1u << 3)
-#define BTN_A         (1u << 4)
-#define BTN_B         (1u << 5)
-#define BTN_X         (1u << 6)
-#define BTN_Y         (1u << 7)
-#define BTN_L1        (1u << 8)
-#define BTN_R1        (1u << 9)
-#define BTN_L2        (1u << 10)
-#define BTN_R2        (1u << 11)
-#define BTN_SELECT    (1u << 12)
-#define BTN_START     (1u << 13)
-#define BTN_MENU      (1u << 14)
-#define BTN_VOL_UP    (1u << 15)
-#define BTN_VOL_DOWN  (1u << 16)
 
 typedef struct {
     uint32_t held;
@@ -232,72 +217,16 @@ static void platform_present(void) {
 }
 
 static uint32_t translate_x11_keysym(KeySym ks) {
+    uint32_t mask = rg35xxsp_map_x11_keysym((unsigned long)ks);
+    if (mask) return mask;
     switch (ks) {
-        /* D-Pad Up / Down / Left / Right -> Cursor Keys */
-        case XK_Up:
-        case XK_KP_Up:      return BTN_UP;
-        case XK_Down:
-        case XK_KP_Down:    return BTN_DOWN;
-        case XK_Left:
-        case XK_KP_Left:    return BTN_LEFT;
-        case XK_Right:
-        case XK_KP_Right:   return BTN_RIGHT;
-
-        /* Face Buttons A / B / X / Y -> Keyboard 'A', 'B', 'X', 'Y' */
-        case XK_a:
-        case XK_A:
-        case XK_z:
-        case XK_Z:
-        case XK_space:
-        case XK_KP_Space:
-        case XK_Alt_L:
-        case XK_Alt_R:      return BTN_A;
-        case XK_b:
-        case XK_B:
-        case XK_Control_L:
-        case XK_Control_R:
-        case XK_BackSpace:  return BTN_B;
-        case XK_x:
-        case XK_X:
-        case XK_Shift_L:    return BTN_X;
-        case XK_y:
-        case XK_Y:          return BTN_Y;
-
-        /* Shoulder Buttons R1 / L1 / R2 / L2 */
-        case XK_r:
-        case XK_R:
-        case XK_e:
-        case XK_E:
-        case XK_bracketright:
-        case XK_Page_Up:
-        case XK_KP_Page_Up: return BTN_R1;
-        case XK_l:
-        case XK_L:
-        case XK_q:
-        case XK_Q:
-        case XK_bracketleft:
-        case XK_Page_Down:
-        case XK_KP_Page_Down: return BTN_L1;
-        case XK_1:          return BTN_L2;
-        case XK_2:          return BTN_R2;
-
-        /* Volume Up / Down */
         case XK_plus:
         case XK_equal:
-        case XK_KP_Add:     return BTN_VOL_UP;
+        case XK_KP_Add:      return BTN_VOL_UP;
         case XK_minus:
         case XK_underscore:
-        case XK_KP_Subtract:return BTN_VOL_DOWN;
-
-        /* Start / Select / Menu */
-        case XK_Return:
-        case XK_KP_Enter:   return BTN_START;
-        case XK_Tab:
-        case XK_ISO_Left_Tab: return BTN_SELECT;
-        case XK_Escape:
-        case XK_m:
-        case XK_M:          return BTN_MENU;
-        default:            return 0;
+        case XK_KP_Subtract: return BTN_VOL_DOWN;
+        default:             return 0;
     }
 }
 
@@ -329,7 +258,7 @@ static uint32_t xkey_to_btn(XKeyEvent *xkey) {
             case '-': case '_':                               mask = BTN_VOL_DOWN; break;
             case '\r': case '\n':                             mask = BTN_START;    break;
             case '\t':                                        mask = BTN_SELECT;   break;
-            case 27:  case 'm': case 'M':                     mask = BTN_MENU;     break;
+            case 27:                                          mask = BTN_MENU;     break;
             default: break;
         }
     }
@@ -621,82 +550,7 @@ static void platform_present(void) {
 }
 
 static uint32_t translate_rg35xxsp_evkey(uint16_t code) {
-    /*
-     * Unified Anbernic RG35XXSP button mapping across all firmwares
-     * (Allwinner H700 sunxi-keys / Knulli / Batocera / MuOS / Stock OS):
-     *   304 (BTN_SOUTH) -> Physical A
-     *   305 (BTN_EAST)  -> Physical B
-     *   306 (BTN_C)     -> Physical X
-     *   307 (BTN_NORTH) -> Physical Y
-     *   308 (BTN_WEST)  -> Physical L1
-     *   309 (BTN_Z)     -> Physical R1 (Controls / Help toggle)
-     *   310 (BTN_TL)    -> Physical SELECT (or L1 on standard gamepad)
-     *   311 (BTN_TR)    -> Physical START  (or R1 on standard gamepad)
-     *   312 (BTN_TL2)   -> Physical MENU / L2
-     *   313 (BTN_TR2)   -> Physical R2
-     *   314 (BTN_SELECT)-> SELECT on Knulli/Batocera
-     *   315 (BTN_START) -> START on Knulli/Batocera / R2 on H700
-     *   316 (BTN_MODE)  -> MENU (M button)
-     */
-    switch (code) {
-        case 304: return BTN_A;
-        case 305: return BTN_B;
-        case 306: return BTN_X;
-        case 307: return BTN_Y;
-        case 308: return BTN_L1;
-        case 309: return BTN_R1;
-        case 310: return BTN_SELECT;
-        case 311: return BTN_START;
-        case 312: return BTN_MENU;
-        case 313: return BTN_R2;
-        case 314: return BTN_SELECT;
-        case 315: return BTN_START;
-        case 316: return BTN_MENU;
-        case 294:
-        case 295:
-        case 296:
-        case 297:
-        case 298:
-        case 299:
-        case 704:
-        case 705:
-        case 706:
-        case 707:
-        case 708:
-        case 709: return BTN_MENU;
-        default:  break;
-    }
-
-    switch (code) {
-        case KEY_UP:
-        case BTN_DPAD_UP:    return BTN_UP;
-        case KEY_DOWN:
-        case BTN_DPAD_DOWN:  return BTN_DOWN;
-        case KEY_LEFT:
-        case BTN_DPAD_LEFT:  return BTN_LEFT;
-        case KEY_RIGHT:
-        case BTN_DPAD_RIGHT: return BTN_RIGHT;
-        case KEY_VOLUMEUP:   return BTN_VOL_UP;
-        case KEY_VOLUMEDOWN: return BTN_VOL_DOWN;
-        case KEY_A:          return BTN_A;
-        case KEY_B:          return BTN_B;
-        case KEY_X:          return BTN_X;
-        case KEY_Y:          return BTN_Y;
-        case KEY_R:          return BTN_R1;
-        case KEY_ENTER:      return BTN_START;
-        case KEY_ESC:
-        case KEY_Q:
-        case KEY_M:
-        case KEY_F1:
-        case KEY_F4:
-        case KEY_MENU:
-        case KEY_HOMEPAGE:
-        case KEY_PROG1:
-        case KEY_PROG2:
-        case KEY_SELECT:
-        case KEY_BACK:       return BTN_MENU;
-        default:             return 0;
-    }
+    return rg35xxsp_map_evkey(code);
 }
 
 static void save_config(void);
@@ -1875,7 +1729,7 @@ static void render_alarm_set_screen(const struct tm *shifted_tm) {
     draw_pill_button(44,  btn_y2, btn_w, btn_h,
                      "A", "CONFIRM & TEST ALARM SOUND", RGB_COLOR(72, 219, 136), RGB_COLOR(58, 125, 95));
     draw_pill_button(328, btn_y2, btn_w, btn_h,
-                     "R1", "SHOW ALL CONTROLS", RGB_COLOR(255, 155, 75), RGB_COLOR(145, 95, 55));
+                     "Y", "SHOW ALL CONTROLS", RGB_COLOR(255, 155, 75), RGB_COLOR(145, 95, 55));
 }
 
 static void render_help_screen(void) {
@@ -1893,18 +1747,17 @@ static void render_help_screen(void) {
     } k_help_rows[] = {
         { "D-PAD LEFT / RIGHT", "Shift local timezone (TZ -30m / +30m, saved on boot)" },
         { "D-PAD UP / DOWN",    "Adjust screen & clock brightness (1..10, hold=repeat)" },
-        { "X BUTTON",           "Switch clock mode: Retro LED Digital (24H) / Analog" },
+        { "SELECT / X BUTTON",  "Switch clock mode: Retro LED Digital (24H) / Analog" },
         { "A BUTTON",           "Open Alarm Set screen; press A again to save & test" },
-        { "B BUTTON",           "Disable / cancel alarm in Alarm Set screen" },
-        { "Y BUTTON",           "Quick-toggle Alarm ON / OFF (& play confirm sound)" },
-        { "R1 (OR 'R' KEY)",    "Show Controls screen; press R1 again to resume clock" },
-        { "L1 / R2 (IN ALARM)", "Step alarm minutes by -5 / +5 mins while setting" },
+        { "B BUTTON",           "Quick-toggle Alarm ON/OFF (Clock) / Cancel (Alarm Set)" },
+        { "Y BUTTON",           "Show Controls / Help screen; press Y again to resume" },
+        { "L1 / R1 (IN ALARM)", "Step alarm minutes by -5 / +5 mins while setting" },
         { "VOL+ / VOL- (+/-)",  "Adjust volume (0..10) & play confirmation alarm at end" },
-        { "START / SELECT / M", "Save configuration & exit Night Clock" }
+        { "MENU (ESC)",         "Save configuration & exit Night Clock" }
     };
 
     int num_rows = (int)(sizeof(k_help_rows) / sizeof(k_help_rows[0]));
-    int row_h = 35;
+    int row_h = 38;
     for (int i = 0; i < num_rows; i++) {
         int ry = table_y + i * row_h;
         uint32_t row_bg = (i % 2 == 0) ? RGB_COLOR(16, 24, 38) : RGB_COLOR(22, 32, 50);
@@ -1912,14 +1765,14 @@ static void render_help_screen(void) {
         draw_rect(table_x, ry, table_w, row_h - 3, 1, RGB_COLOR(48, 70, 108));
 
         fill_rect(table_x + 8, ry + 4, 178, row_h - 11, RGB_COLOR(32, 52, 84));
-        draw_text(table_x + 16, ry + 12, k_help_rows[i].btn, 1, RGB_COLOR(248, 212, 108));
-        draw_text(table_x + 198, ry + 12, k_help_rows[i].action, 1, RGB_COLOR(225, 235, 250));
+        draw_text(table_x + 16, ry + 13, k_help_rows[i].btn, 1, RGB_COLOR(248, 212, 108));
+        draw_text(table_x + 198, ry + 13, k_help_rows[i].action, 1, RGB_COLOR(225, 235, 250));
     }
 
     /* Footer resume banner */
     fill_rect(20, 414, NATIVE_W - 40, 50, RGB_COLOR(26, 40, 64));
     draw_rect(20, 414, NATIVE_W - 40, 50, 2, RGB_COLOR(255, 155, 75));
-    draw_text_centered(432, "PRESS [R1] AGAIN TO RESUME CLOCK", 2, RGB_COLOR(255, 195, 120));
+    draw_text_centered(432, "PRESS [Y], [A], OR [B] TO RESUME CLOCK", 2, RGB_COLOR(255, 195, 120));
 }
 
 static void render_screen(const struct tm *shifted_tm, uint64_t now_ms) {
@@ -2001,7 +1854,7 @@ int main(int argc, char **argv) {
             if (!platform_poll_input(&input)) {
                 break;
             }
-            if ((input.pressed & (BTN_START | BTN_SELECT | BTN_MENU)) != 0) {
+            if ((input.pressed & BTN_MENU) != 0) {
                 break;
             }
         }
@@ -2049,15 +1902,15 @@ int main(int argc, char **argv) {
             trigger_confirmation_alarm_sound();
         }
 
-        /* R1 toggles the Controls / Help screen on the single display, and pressing R1 again resumes the clock */
-        if (input.pressed & BTN_R1) {
+        /* Y toggles the Controls / Help screen on the single display, and pressing Y again resumes the clock */
+        if (input.pressed & BTN_Y) {
             if (g_ui_mode == UI_MODE_HELP) {
                 g_ui_mode = g_mode_before_help;
             } else {
                 g_mode_before_help = g_ui_mode;
                 g_ui_mode = UI_MODE_HELP;
             }
-            input.pressed &= ~BTN_R1;
+            input.pressed &= ~BTN_Y;
         }
 
         if (g_ui_mode == UI_MODE_HELP) {
@@ -2085,13 +1938,11 @@ int main(int argc, char **argv) {
                 }
             }
 
-            /* Fast +/-5 minute step with L1/L2 or R2, or toggle ON/OFF with Y */
+            /* Fast +/-5 minute step with L1/L2 or R1/R2 */
             if (input.pressed & (BTN_L1 | BTN_L2)) {
                 g_edit_alarm_min = (g_edit_alarm_min - 5 + 60) % 60;
-            } else if (input.pressed & BTN_R2) {
+            } else if (input.pressed & (BTN_R1 | BTN_R2)) {
                 g_edit_alarm_min = (g_edit_alarm_min + 5) % 60;
-            } else if (input.pressed & BTN_Y) {
-                g_edit_alarm_enabled = !g_edit_alarm_enabled;
             }
 
             if (input.pressed & BTN_A) {
@@ -2153,15 +2004,15 @@ int main(int argc, char **argv) {
                 show_toast(msg, now_ms);
             }
 
-            /* X Key: Switch between Retro LED Digital (24H) and Minimal Analog */
-            if (input.pressed & BTN_X) {
+            /* SELECT or X Key: Switch between Retro LED Digital (24H) and Minimal Analog */
+            if (input.pressed & (BTN_SELECT | BTN_X)) {
                 g_is_analog = !g_is_analog;
                 save_config();
                 show_toast(g_is_analog ? "ANALOG CLOCK MODE" : "DIGITAL CLOCK MODE (24H)", now_ms);
             }
 
-            /* Y Key: Quick-toggle Alarm ON / OFF */
-            if (input.pressed & BTN_Y) {
+            /* B Key: Secondary action — Quick-toggle Alarm ON / OFF */
+            if (input.pressed & BTN_B) {
                 g_alarm_enabled = !g_alarm_enabled;
                 save_config();
                 if (g_alarm_enabled) {
@@ -2174,7 +2025,7 @@ int main(int argc, char **argv) {
                 }
             }
 
-            /* A Key: Open Alarm Set Mode on screen */
+            /* A Key: Primary action — Open Alarm Set Mode on screen */
             if (input.pressed & BTN_A) {
                 g_edit_alarm_hour    = g_alarm_hour;
                 g_edit_alarm_min     = g_alarm_min;

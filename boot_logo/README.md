@@ -40,7 +40,7 @@ Every `.bmp` file in `logos/` and `backup/` is formatted to match Knulli Scarab'
 | **Button B** (or `B` / `Backspace`) | Open **Revert to Stock** confirmation modal; press **A** to restore factory `bootlogo.bmp` |
 | **Button Y / X** (or `Y` / `X`) | Toggle unobstructed **1:1 Full-Screen `640x480` View** (hides top/bottom HUD bars) |
 | **Button R1** (or `R` / `E`) | Toggle **Controls Help** overlay; press **R1** again to resume |
-| **START / MENU** (or `Enter` / `Esc`) | Exit Boot Logo Customizer |
+| **MENU** (or `Esc` on Desktop) | Exit Boot Logo Customizer |
 
 ---
 

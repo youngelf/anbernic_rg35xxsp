@@ -38,22 +38,7 @@
 #define RGB_COLOR(r, g, b) \
     (0xFF000000u | (((uint32_t)(r) & 0xFFu) << 16) | (((uint32_t)(g) & 0xFFu) << 8) | ((uint32_t)(b) & 0xFFu))
 
-/* Logical button bitmask */
-#define BTN_UP        (1u << 0)
-#define BTN_DOWN      (1u << 1)
-#define BTN_LEFT      (1u << 2)
-#define BTN_RIGHT     (1u << 3)
-#define BTN_A         (1u << 4)
-#define BTN_B         (1u << 5)
-#define BTN_X         (1u << 6)
-#define BTN_Y         (1u << 7)
-#define BTN_L1        (1u << 8)
-#define BTN_R1        (1u << 9)
-#define BTN_L2        (1u << 10)
-#define BTN_R2        (1u << 11)
-#define BTN_SELECT    (1u << 12)
-#define BTN_START     (1u << 13)
-#define BTN_MENU      (1u << 14)
+#include "../rg35xxsp_input.h"
 
 typedef struct {
     uint32_t held;
@@ -276,71 +261,13 @@ static void platform_present(void) {
 }
 
 static uint32_t translate_x11_keysym(KeySym ks) {
-    switch (ks) {
-        /* D-Pad Up / Down / Left / Right -> Cursor Keys */
-        case XK_Up:
-        case XK_KP_Up:      return BTN_UP;
-        case XK_Down:
-        case XK_KP_Down:    return BTN_DOWN;
-        case XK_Left:
-        case XK_KP_Left:    return BTN_LEFT;
-        case XK_Right:
-        case XK_KP_Right:   return BTN_RIGHT;
-
-        /* Face Buttons A / B / X / Y -> Keyboard 'A', 'B', 'X', 'Y' */
-        case XK_a:
-        case XK_A:
-        case XK_z:
-        case XK_Z:
-        case XK_space:
-        case XK_KP_Space:
-        case XK_Alt_L:
-        case XK_Alt_R:      return BTN_A;
-        case XK_b:
-        case XK_B:
-        case XK_Control_L:
-        case XK_Control_R:
-        case XK_BackSpace:  return BTN_B;
-        case XK_x:
-        case XK_X:
-        case XK_Shift_L:    return BTN_X;
-        case XK_y:
-        case XK_Y:          return BTN_Y;
-
-        /* Shoulder Buttons R1 / L1 / R2 / L2 */
-        case XK_r:
-        case XK_R:
-        case XK_e:
-        case XK_E:
-        case XK_bracketright:
-        case XK_Page_Up:
-        case XK_KP_Page_Up: return BTN_R1;
-        case XK_l:
-        case XK_L:
-        case XK_q:
-        case XK_Q:
-        case XK_bracketleft:
-        case XK_Page_Down:
-        case XK_KP_Page_Down: return BTN_L1;
-        case XK_1:          return BTN_L2;
-        case XK_2:          return BTN_R2;
-
-        /* Start / Select / Menu */
-        case XK_Return:
-        case XK_KP_Enter:   return BTN_START;
-        case XK_Tab:
-        case XK_ISO_Left_Tab: return BTN_SELECT;
-        case XK_Escape:
-        case XK_m:
-        case XK_M:          return BTN_MENU;
-        default:            return 0;
-    }
+    return rg35xxsp_map_x11_keysym(ks);
 }
 
 static uint32_t xkey_to_btn(XKeyEvent *xkey) {
     char buf[8] = {0};
     KeySym sym = NoSymbol;
-    int n = XLookupString(xkey, buf, sizeof(buf) - 1, &sym, NULL);
+    XLookupString(xkey, buf, sizeof(buf) - 1, &sym, NULL);
     if (sym == NoSymbol) {
         sym = XLookupKeysym(xkey, 0);
     }
@@ -349,20 +276,6 @@ static uint32_t xkey_to_btn(XKeyEvent *xkey) {
         KeySym base_sym = XLookupKeysym(xkey, 0);
         if (base_sym != NoSymbol && base_sym != sym) {
             mask = translate_x11_keysym(base_sym);
-        }
-    }
-    if (!mask && n > 0) {
-        switch (buf[0]) {
-            case 'a': case 'A': case ' ': case 'z': case 'Z': mask = BTN_A;      break;
-            case 'b': case 'B': case '\b': case 127:          mask = BTN_B;      break;
-            case 'x': case 'X':                               mask = BTN_X;      break;
-            case 'y': case 'Y':                               mask = BTN_Y;      break;
-            case 'r': case 'R': case 'e': case 'E': case ']': mask = BTN_R1;     break;
-            case 'l': case 'L': case 'q': case 'Q': case '[': mask = BTN_L1;     break;
-            case '\r': case '\n':                             mask = BTN_START;  break;
-            case '\t':                                        mask = BTN_SELECT; break;
-            case 27:  case 'm': case 'M':                     mask = BTN_MENU;   break;
-            default: break;
         }
     }
     return mask;
@@ -644,64 +557,7 @@ static void platform_present(void) {
 }
 
 static uint32_t translate_rg35xxsp_evkey(uint16_t code) {
-    switch (code) {
-        case 304: return BTN_A;
-        case 305: return BTN_B;
-        case 306: return BTN_X;
-        case 307: return BTN_Y;
-        case 308: return BTN_L1;
-        case 309: return BTN_R1;
-        case 310: return BTN_SELECT;
-        case 311: return BTN_START;
-        case 312: return BTN_MENU;
-        case 313: return BTN_R2;
-        case 314: return BTN_SELECT;
-        case 315: return BTN_START;
-        case 316: return BTN_MENU;
-        case 294:
-        case 295:
-        case 296:
-        case 297:
-        case 298:
-        case 299:
-        case 704:
-        case 705:
-        case 706:
-        case 707:
-        case 708:
-        case 709: return BTN_MENU;
-        default:  break;
-    }
-
-    switch (code) {
-        case KEY_UP:
-        case BTN_DPAD_UP:    return BTN_UP;
-        case KEY_DOWN:
-        case BTN_DPAD_DOWN:  return BTN_DOWN;
-        case KEY_LEFT:
-        case BTN_DPAD_LEFT:  return BTN_LEFT;
-        case KEY_RIGHT:
-        case BTN_DPAD_RIGHT: return BTN_RIGHT;
-        case KEY_A:          return BTN_A;
-        case KEY_B:          return BTN_B;
-        case KEY_X:          return BTN_X;
-        case KEY_Y:          return BTN_Y;
-        case KEY_R:          return BTN_R1;
-        case KEY_L:          return BTN_L1;
-        case KEY_ENTER:      return BTN_START;
-        case KEY_ESC:
-        case KEY_Q:
-        case KEY_M:
-        case KEY_F1:
-        case KEY_F4:
-        case KEY_MENU:
-        case KEY_HOMEPAGE:
-        case KEY_PROG1:
-        case KEY_PROG2:
-        case KEY_SELECT:
-        case KEY_BACK:       return BTN_MENU;
-        default:             return 0;
-    }
+    return rg35xxsp_map_evkey((int)code);
 }
 
 static bool platform_poll_input(input_state_t *out) {
@@ -732,27 +588,11 @@ static bool platform_poll_input(input_state_t *out) {
                     }
                 }
             } else if (ie.type == EV_ABS) {
-                if (ie.code == ABS_HAT0X) {
-                    int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
-                    if (val != g_evdevs[i].hat_x) {
-                        uint32_t old_lr = g_cur_buttons & (BTN_LEFT | BTN_RIGHT);
-                        uint32_t new_lr = (val < 0) ? BTN_LEFT : (val > 0) ? BTN_RIGHT : 0;
-                        pressed_latch  |= (new_lr & ~old_lr);
-                        released_latch |= (old_lr & ~new_lr);
-                        g_cur_buttons   = (g_cur_buttons & ~(BTN_LEFT | BTN_RIGHT)) | new_lr;
-                        g_evdevs[i].hat_x = val;
-                    }
-                } else if (ie.code == ABS_HAT0Y) {
-                    int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
-                    if (val != g_evdevs[i].hat_y) {
-                        uint32_t old_ud = g_cur_buttons & (BTN_UP | BTN_DOWN);
-                        uint32_t new_ud = (val < 0) ? BTN_UP : (val > 0) ? BTN_DOWN : 0;
-                        pressed_latch  |= (new_ud & ~old_ud);
-                        released_latch |= (old_ud & ~new_ud);
-                        g_cur_buttons   = (g_cur_buttons & ~(BTN_UP | BTN_DOWN)) | new_ud;
-                        g_evdevs[i].hat_y = val;
-                    }
-                }
+                uint32_t old_btns = g_cur_buttons;
+                uint32_t new_btns = rg35xxsp_update_evabs(old_btns, ie.code, ie.value, 0, 0);
+                pressed_latch  |= (new_btns & ~old_btns);
+                released_latch |= (old_btns & ~new_btns);
+                g_cur_buttons   = new_btns;
             }
         }
     }
@@ -1392,10 +1232,10 @@ static void render_ui_frame(
             draw_centered_text(px + 19, py + 7, num_str, 2, RGB_COLOR(255, 255, 255));
         }
 
-        /* R1 Help badge on top right */
+        /* Y Help badge on top right */
         fill_rect(484, 8, 144, 28, RGB_COLOR(44, 34, 78));
         draw_rect(484, 8, 144, 28, 2, RGB_COLOR(195, 155, 255));
-        draw_centered_text(556, 15, "[R1] CONTROLS", 1, RGB_COLOR(235, 220, 255));
+        draw_centered_text(556, 15, "[Y] HELP", 1, RGB_COLOR(235, 220, 255));
 
         /* Bottom HUD bar (384..480) */
         draw_alpha_rect(0, 384, NATIVE_W, 96, RGB_COLOR(10, 12, 24), 218);
@@ -1420,20 +1260,20 @@ static void render_ui_frame(
         draw_text(16, 416, g_themes[cur_idx].subtitle, 1, RGB_COLOR(220, 225, 240));
 
         /* Action button strip (y = 434..472) */
-        /* 1. D-Pad Prev/Next */
+        /* 1. D-Pad & L1/R1 Prev/Next */
         fill_rect(14, 434, 142, 38, RGB_COLOR(36, 32, 68));
         draw_rect(14, 434, 142, 38, 2, RGB_COLOR(125, 115, 195));
-        draw_centered_text(85, 449, "[D-PAD] THEME", 1, RGB_COLOR(245, 245, 255));
+        draw_centered_text(85, 449, "[DPAD/L/R] THEME", 1, RGB_COLOR(245, 245, 255));
 
         /* 2. [A] Flash Boot Logo */
         fill_rect(166, 434, 164, 38, RGB_COLOR(26, 108, 62));
         draw_rect(166, 434, 164, 38, 2, RGB_COLOR(105, 255, 160));
         draw_centered_text(248, 449, "[A] FLASH LOGO", 1, RGB_COLOR(255, 255, 255));
 
-        /* 3. [Y] 1:1 Full Screen */
+        /* 3. [SELECT] 1:1 Full Screen */
         fill_rect(340, 434, 138, 38, RGB_COLOR(30, 56, 94));
         draw_rect(340, 434, 138, 38, 2, RGB_COLOR(100, 200, 255));
-        draw_centered_text(409, 449, "[Y] FULL VIEW", 1, RGB_COLOR(225, 245, 255));
+        draw_centered_text(409, 449, "[SEL] FULL VIEW", 1, RGB_COLOR(225, 245, 255));
 
         /* 4. [B] Restore Stock */
         fill_rect(488, 434, 138, 38, RGB_COLOR(88, 34, 48));
@@ -1441,7 +1281,7 @@ static void render_ui_frame(
         draw_centered_text(557, 449, "[B] REVERT STOCK", 1, RGB_COLOR(255, 230, 235));
     }
 
-    /* 3. Modal Overlays (Confirm Flash, Confirm Revert Stock, Result, R1 Controls Help) */
+    /* 3. Modal Overlays (Confirm Flash, Confirm Revert Stock, Result, Y Controls Help) */
     if (modal != MODAL_NONE) {
         draw_alpha_rect(0, 0, NATIVE_W, NATIVE_H, RGB_COLOR(6, 8, 16), 215);
 
@@ -1454,21 +1294,21 @@ static void render_ui_frame(
             fill_rect(mx + 24, my + 44, mw - 48, 2, RGB_COLOR(70, 95, 150));
 
             draw_text(mx + 24, my + 62,  "D-PAD UP / DOWN : Prev / Next Theme", 2, RGB_COLOR(235, 240, 255));
-            draw_text(mx + 24, my + 92,  "D-PAD LEFT/RIGHT: Prev / Next Theme", 2, RGB_COLOR(235, 240, 255));
+            draw_text(mx + 24, my + 92,  "LEFT/RIGHT/L1/R1: Prev / Next Theme", 2, RGB_COLOR(235, 240, 255));
             draw_text(mx + 24, my + 122, "BUTTON A        : Flash Boot Logo", 2, RGB_COLOR(115, 255, 165));
             draw_text(mx + 24, my + 152, "BUTTON B        : Revert to Stock Logo", 2, RGB_COLOR(255, 165, 145));
-            draw_text(mx + 24, my + 182, "BUTTON Y / X    : Toggle 1:1 Full View", 2, RGB_COLOR(125, 220, 255));
-            draw_text(mx + 24, my + 212, "BUTTON R1       : Toggle Controls Help", 2, RGB_COLOR(215, 175, 255));
-            draw_text(mx + 24, my + 242, "START / MENU    : Exit Customizer", 2, RGB_COLOR(255, 215, 120));
+            draw_text(mx + 24, my + 182, "SELECT / X      : Toggle 1:1 Full View", 2, RGB_COLOR(125, 220, 255));
+            draw_text(mx + 24, my + 212, "BUTTON Y        : Toggle Controls Help", 2, RGB_COLOR(215, 175, 255));
+            draw_text(mx + 24, my + 242, "MENU (ESC)      : Exit Customizer", 2, RGB_COLOR(255, 215, 120));
 
             fill_rect(mx + 24, my + 274, mw - 48, 86, RGB_COLOR(14, 16, 32));
             draw_rect(mx + 24, my + 274, mw - 48, 86, 2, RGB_COLOR(65, 80, 125));
             draw_text(mx + 38, my + 286, "SURGICAL MODE (OPTION A):", 1, RGB_COLOR(255, 220, 95));
             draw_text(mx + 38, my + 304, "Writes 640x480 32-bit BITMAPV5HEADER BGRA (1,228,938 B)", 1, RGB_COLOR(205, 215, 235));
-            draw_text(mx + 38, my + 320, "to /boot/bootlogo.bmp with SHA-256 verification and", 1, RGB_COLOR(205, 215, 235));
-            draw_text(mx + 38, my + 336, "stores the original stock image in ./backup/.", 1, RGB_COLOR(140, 245, 180));
+            draw_text(mx + 38, my + 304 + 16, "to /boot/bootlogo.bmp with SHA-256 verification and", 1, RGB_COLOR(205, 215, 235));
+            draw_text(mx + 38, my + 304 + 32, "stores the original stock image in ./backup/.", 1, RGB_COLOR(140, 245, 180));
 
-            draw_centered_text(320, my + 384, "Press [R1], [A], or [B] to Resume", 2, RGB_COLOR(255, 235, 110));
+            draw_centered_text(320, my + 384, "Press [Y], [A], or [B] to Resume", 2, RGB_COLOR(255, 235, 110));
         } else {
             int mx = 48, my = 100, mw = 544, mh = 280;
             fill_rect(mx, my, mw, mh, RGB_COLOR(24, 22, 48));
@@ -1615,12 +1455,12 @@ int main(int argc, char **argv) {
 
     input_state_t input;
     while (!g_sig_quit && platform_poll_input(&input)) {
-        if ((input.pressed & (BTN_START | BTN_SELECT | BTN_MENU)) && modal == MODAL_NONE) {
+        if (input.pressed & BTN_MENU) {
             break;
         }
 
         if (modal == MODAL_HELP) {
-            if (input.pressed & (BTN_R1 | BTN_A | BTN_B | BTN_X | BTN_Y | BTN_START | BTN_MENU)) {
+            if (input.pressed & (BTN_Y | BTN_A | BTN_B | BTN_SELECT)) {
                 modal = MODAL_NONE;
             }
         } else if (modal == MODAL_CONFIRM_FLASH) {
@@ -1631,7 +1471,7 @@ int main(int argc, char **argv) {
                     status_detail,   sizeof(status_detail));
                 active_boot_idx = detect_active_bootlogo_theme();
                 modal = MODAL_RESULT;
-            } else if (input.pressed & (BTN_B | BTN_X | BTN_Y | BTN_R1)) {
+            } else if (input.pressed & (BTN_B | BTN_Y | BTN_SELECT)) {
                 modal = MODAL_NONE;
             }
         } else if (modal == MODAL_CONFIRM_STOCK) {
@@ -1643,7 +1483,7 @@ int main(int argc, char **argv) {
                     status_detail,   sizeof(status_detail));
                 active_boot_idx = detect_active_bootlogo_theme();
                 modal = MODAL_RESULT;
-            } else if (input.pressed & (BTN_B | BTN_X | BTN_Y | BTN_R1)) {
+            } else if (input.pressed & (BTN_B | BTN_Y | BTN_SELECT)) {
                 modal = MODAL_NONE;
             }
         } else if (modal == MODAL_RESULT) {
@@ -1655,13 +1495,13 @@ int main(int argc, char **argv) {
             if (input.pressed & (BTN_UP | BTN_LEFT | BTN_L1)) {
                 cur_idx = (cur_idx + NUM_THEMES - 1) % NUM_THEMES;
             }
-            if (input.pressed & (BTN_DOWN | BTN_RIGHT)) {
+            if (input.pressed & (BTN_DOWN | BTN_RIGHT | BTN_R1)) {
                 cur_idx = (cur_idx + 1) % NUM_THEMES;
             }
-            if (input.pressed & (BTN_Y | BTN_X)) {
+            if (input.pressed & (BTN_SELECT | BTN_X)) {
                 full_preview_mode = !full_preview_mode;
             }
-            if (input.pressed & BTN_R1) {
+            if (input.pressed & BTN_Y) {
                 modal = MODAL_HELP;
             }
             if (input.pressed & BTN_A) {

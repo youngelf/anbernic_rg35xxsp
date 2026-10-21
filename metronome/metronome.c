@@ -6,12 +6,13 @@
  *   running Knulli (Scarab) / Batocera Linux, plus x86_64 Linux desktop X11 host.
  *
  * Controls on Anbernic RG35XX SP & Linux Host:
- *   A Button (or B / Space / 'A')   : Play / Pause metronome
+ *   A Button (Space / 'A')          : Play / Pause metronome (Primary Action)
+ *   B / X Buttons (BackSpace / 'B') : Reset Tempo to 120 BPM (Secondary Action)
  *   D-Pad UP / DOWN                 : Increase / Decrease Tempo (BPM)
  *   D-Pad LEFT / RIGHT              : Cycle Time Signature (4/4, 3/4, 2/4, 5/4, 7/4)
  *   L1 / R1 Shoulder Buttons        : Decrease / Increase Click Drop-Rate by 5% (0%..100%)
- *   X / Y Buttons ('R' on Linux)    : Reset Tempo to 120 BPM
- *   MENU (M) / SELECT / START+SELECT: Save settings & Exit to Knulli
+ *   Y Button ('Y' on Linux)         : Toggle Help overlay
+ *   MENU (M) ('Esc' on Linux)       : Save settings & Exit to Knulli
  */
 
 #include <stdio.h>
@@ -28,6 +29,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
+
+#include "../rg35xxsp_input.h"
 
 /* Virtual canvas is 320x240, scaled 2x to native 640x480 on RG35XX SP & Linux */
 #define CANVAS_W 320
@@ -59,6 +62,7 @@ typedef enum {
     ACT_SIG_PREV,
     ACT_SIG_NEXT,
     ACT_RESET_BPM,
+    ACT_HELP,
     ACT_QUIT
 } InputAction;
 
@@ -175,6 +179,20 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
             }
         }
     }
+}
+
+static InputAction mask_to_action(uint32_t mask) {
+    if (mask & BTN_MENU)  return ACT_QUIT;
+    if (mask & BTN_Y)     return ACT_HELP;
+    if (mask & BTN_A)     return ACT_PLAY_PAUSE;
+    if (mask & (BTN_B | BTN_X)) return ACT_RESET_BPM;
+    if (mask & BTN_UP)    return ACT_BPM_UP;
+    if (mask & BTN_DOWN)  return ACT_BPM_DOWN;
+    if (mask & BTN_LEFT)  return ACT_SIG_PREV;
+    if (mask & BTN_RIGHT) return ACT_SIG_NEXT;
+    if (mask & BTN_L1)    return ACT_DROP_DOWN;
+    if (mask & BTN_R1)    return ACT_DROP_UP;
+    return ACT_NONE;
 }
 
 /* =========================================================================
@@ -319,42 +337,9 @@ static InputAction platform_poll_input(void) {
             }
         } else if (xev.type == KeyPress) {
             KeySym ks = XLookupKeysym(&xev.xkey, 0);
-            if (ks >= XK_A && ks <= XK_Z) ks = ks - XK_A + XK_a;
-            switch (ks) {
-                case XK_a:
-                case XK_b:
-                case XK_space:
-                case XK_Return:
-                case XK_Alt_L:
-                    return ACT_PLAY_PAUSE;
-                case XK_Up:
-                    return ACT_BPM_UP;
-                case XK_Down:
-                    return ACT_BPM_DOWN;
-                case XK_Left:
-                    return ACT_SIG_PREV;
-                case XK_Right:
-                    return ACT_SIG_NEXT;
-                case XK_Page_Up:
-                case XK_BackSpace:
-                case XK_bracketright:
-                    return ACT_DROP_UP;
-                case XK_Page_Down:
-                case XK_Tab:
-                case XK_bracketleft:
-                    return ACT_DROP_DOWN;
-                case XK_r:
-                case XK_x:
-                case XK_y:
-                case XK_Shift_L:
-                    return ACT_RESET_BPM;
-                case XK_q:
-                case XK_m:
-                case XK_Escape:
-                    return ACT_QUIT;
-                default:
-                    break;
-            }
+            uint32_t mask = rg35xxsp_map_x11_keysym((unsigned long)ks);
+            InputAction act = mask_to_action(mask);
+            if (act != ACT_NONE) return act;
         }
     }
     return ACT_NONE;
@@ -455,8 +440,6 @@ static uint32_t g_scaled_frame[NATIVE_W * NATIVE_H];
 #define MAX_EVDEV_FDS 32
 static int g_evdev_fds[MAX_EVDEV_FDS];
 static int g_num_evdev_fds = 0;
-static bool g_btn_select_held = false;
-static bool g_btn_start_held = false;
 static int g_hat_x = 0;
 static int g_hat_y = 0;
 
@@ -695,90 +678,10 @@ static InputAction platform_poll_input(void) {
         struct input_event ie;
         while (read(g_evdev_fds[i], &ie, sizeof(ie)) == (ssize_t)sizeof(ie)) {
             if (ie.type == EV_KEY) {
-                bool pressed = (ie.value == 1); /* 1 = key press, 2 = autorepeat, 0 = release */
-                if (ie.code == BTN_SELECT || ie.code == KEY_ESC) {
-                    g_btn_select_held = (ie.value != 0);
-                    if (pressed && g_btn_start_held) return ACT_QUIT;
-                }
-                if (ie.code == BTN_START || ie.code == KEY_ENTER) {
-                    g_btn_start_held = (ie.value != 0);
-                    if (pressed && g_btn_select_held) return ACT_QUIT;
-                }
-
-                if (!pressed) continue;
-
-                switch (ie.code) {
-                    /* A / B face buttons on RG35XX SP -> Play / Pause */
-                    case 304:        /* BTN_SOUTH (Physical A) */
-                    case 305:        /* BTN_EAST  (Physical B) */
-                    case KEY_SPACE:
-                    case KEY_LEFTALT:
-                        return ACT_PLAY_PAUSE;
-
-                    /* X / Y face buttons -> Reset BPM to 120 */
-                    case 306:        /* BTN_C     (Physical X) */
-                    case 307:        /* BTN_NORTH (Physical Y) */
-                        return ACT_RESET_BPM;
-
-                    /* D-Pad UP / DOWN -> Tempo +/- 1 BPM */
-                    case BTN_DPAD_UP:
-                    case KEY_UP:
-                        return ACT_BPM_UP;
-                    case BTN_DPAD_DOWN:
-                    case KEY_DOWN:
-                        return ACT_BPM_DOWN;
-
-                    /* D-Pad LEFT / RIGHT -> Cycle Time Signature */
-                    case BTN_DPAD_LEFT:
-                    case KEY_LEFT:
-                        return ACT_SIG_PREV;
-                    case BTN_DPAD_RIGHT:
-                    case KEY_RIGHT:
-                        return ACT_SIG_NEXT;
-
-                    /* Shoulder Buttons L1 / R1 -> Click Drop-Rate -5% / +5% */
-                    case 308:        /* BTN_WEST (Physical L1 on H700) */
-                    case KEY_TAB:
-                        return ACT_DROP_DOWN;
-                    case 309:        /* BTN_Z    (Physical R1 on H700) */
-                    case 311:        /* BTN_TR   (R1 on standard gamepad) */
-                    case KEY_BACKSPACE:
-                        return ACT_DROP_UP;
-
-                    /* Menu (M) button or SELECT -> Save & Quit */
-                    case 310:        /* BTN_TL     (Physical SELECT on H700 ANBERNIC-keys) */
-                    case 312:        /* BTN_TL2    (Physical MENU on H700 ANBERNIC-keys) */
-                    case 313:        /* BTN_TR2 */
-                    case 314:        /* BTN_SELECT (Select on Knulli/Batocera) */
-                    case 316:        /* BTN_MODE   (Menu M button on Knulli/Batocera) */
-                    case 294:
-                    case 295:
-                    case 296:
-                    case 297:
-                    case 298:
-                    case 299:
-                    case 704:        /* BTN_TRIGGER_HAPPY1 (Menu/Select on Batocera/Knulli) */
-                    case 705:
-                    case 706:
-                    case 707:
-                    case 708:
-                    case 709:
-                    case KEY_ESC:
-                    case KEY_Q:
-                    case KEY_M:
-                    case KEY_F1:
-                    case KEY_F4:
-                    case KEY_MENU:
-                    case KEY_HOMEPAGE:
-                    case KEY_PROG1:
-                    case KEY_PROG2:
-                    case KEY_SELECT:
-                    case KEY_BACK:
-                        return ACT_QUIT;
-
-                    default:
-                        break;
-                }
+                if (ie.value != 1) continue; /* 1 = key press */
+                uint32_t mask = rg35xxsp_map_evkey(ie.code);
+                InputAction act = mask_to_action(mask);
+                if (act != ACT_NONE) return act;
             } else if (ie.type == EV_ABS) {
                 /* D-Pad reported via Hat axes (ABS_HAT0X / ABS_HAT0Y) or analog axes */
                 if (ie.code == ABS_HAT0X) {
@@ -1049,15 +952,21 @@ static void draw_text_centered(uint32_t *canvas, int cx, int y, const char *str,
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    bool dump_promo_mode = false;
+    const char *dump_prefix = NULL;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--dump-promo") == 0 && i + 1 < argc) {
+            dump_promo_mode = true;
+            dump_prefix = argv[++i];
+        }
+    }
 
     srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
     resolve_config_path();
     load_config();
     g_drop_pct = 0; /* Always start at 0% drop-rate so all clicks are played */
 
-    if (!platform_init()) {
+    if (!dump_promo_mode && !platform_init()) {
         return 1;
     }
 
@@ -1077,6 +986,7 @@ int main(int argc, char *argv[]) {
     uint32_t col_box_idle   = make_rgb(36, 44, 66);
 
     bool running = true;
+    bool show_help = false;
     int current_beat = 0;  /* 0 .. beats_per_bar - 1 */
     int measure_count = 0; /* Measures elapsed since start (0..3 = 4-measure lock-in) */
     double next_beat_time_ms = 0.0;
@@ -1085,8 +995,24 @@ int main(int argc, char *argv[]) {
     while (running) {
         uint32_t now_ms = get_ticks_ms();
 
-        InputAction act;
-        while ((act = platform_poll_input()) != ACT_NONE) {
+        if (!dump_promo_mode) {
+            InputAction act;
+            while ((act = platform_poll_input()) != ACT_NONE) {
+            if (act == ACT_QUIT) {
+                running = false;
+                break;
+            }
+            if (act == ACT_HELP) {
+                show_help = !show_help;
+                continue;
+            }
+            if (show_help) {
+                if (act == ACT_PLAY_PAUSE || act == ACT_RESET_BPM) {
+                    show_help = false;
+                }
+                continue;
+            }
+
             switch (act) {
                 case ACT_PLAY_PAUSE:
                     g_playing = !g_playing;
@@ -1154,13 +1080,17 @@ int main(int argc, char *argv[]) {
                     save_config();
                     break;
 
-                case ACT_QUIT:
-                    running = false;
-                    break;
-
                 default:
                     break;
             }
+        }
+        } else {
+            g_bpm = 120;
+            g_time_sig_idx = 0;
+            g_drop_pct = 15;
+            g_playing = true;
+            current_beat = 0;
+            last_beat_trigger_ms = now_ms - 50;
         }
 
         /* Metronome Beat Scheduler */
@@ -1290,14 +1220,58 @@ int main(int argc, char *argv[]) {
         draw_rect(canvas, 0, 214, CANVAS_W, 26, col_panel_dark);
         draw_rect(canvas, 0, 214, CANVAS_W, 1, col_border);
         draw_text_centered(canvas, CANVAS_W / 2, 223,
-                           "A:PLAY/PAUSE  UP/DN:BPM  L/R:TIME SIG  MENU:EXIT", 1, col_muted);
+                           "A:PLAY  B:120  UP/DN:BPM  L/R:SIG  Y:HELP  MENU:EXIT", 1, col_muted);
+
+        /* 5. Help Modal Overlay (toggled with Y) */
+        if (show_help) {
+            draw_rect(canvas, 16, 20, 288, 200, col_panel_dark);
+            draw_border(canvas, 16, 20, 288, 200, 2, col_gold);
+            draw_rect(canvas, 18, 22, 284, 24, col_panel);
+            draw_text_centered(canvas, CANVAS_W / 2, 27, "METRONOME CONTROLS", 2, col_gold);
+
+            draw_text(canvas, 28,  58, "A BUTTON      : PLAY / PAUSE", 1, col_white);
+            draw_text(canvas, 28,  74, "B / X BUTTON  : RESET TO 120 BPM", 1, col_white);
+            draw_text(canvas, 28,  90, "D-PAD UP/DOWN : TEMPO +/- 1 BPM", 1, col_cyan);
+            draw_text(canvas, 28, 106, "D-PAD L/R     : TIME SIGNATURE", 1, col_cyan);
+            draw_text(canvas, 28, 122, "L1 / R1       : DROP CLICK -/+ 5%", 1, col_gold);
+            draw_text(canvas, 28, 138, "Y BUTTON      : TOGGLE HELP", 1, col_muted);
+            draw_text(canvas, 28, 154, "MENU (ESC)    : SAVE & EXIT", 1, col_accent);
+
+            draw_rect(canvas, 28, 182, 264, 24, col_panel);
+            draw_border(canvas, 28, 182, 264, 24, 1, col_border);
+            draw_text_centered(canvas, CANVAS_W / 2, 191, "PRESS Y, A, OR B TO CLOSE", 1, col_gold);
+        }
+
+        if (dump_promo_mode && dump_prefix) {
+            uint32_t *scaled = (uint32_t *)calloc(NATIVE_W * NATIVE_H, sizeof(uint32_t));
+            for (int y = 0; y < CANVAS_H; y++) {
+                for (int x = 0; x < CANVAS_W; x++) {
+                    uint32_t c = canvas[y * CANVAS_W + x];
+                    for (int sy = 0; sy < SCREEN_SCALE; sy++) {
+                        uint32_t *row = scaled + (y * SCREEN_SCALE + sy) * NATIVE_W + (x * SCREEN_SCALE);
+                        for (int sx = 0; sx < SCREEN_SCALE; sx++) {
+                            row[sx] = c;
+                        }
+                    }
+                }
+            }
+            FILE *df = fopen(dump_prefix, "wb");
+            if (df) {
+                fwrite(scaled, sizeof(uint32_t), (size_t)NATIVE_W * NATIVE_H, df);
+                fclose(df);
+            }
+            free(scaled);
+            break;
+        }
 
         platform_present(canvas);
         delay_ms(8); /* ~120 Hz poll & render loop */
     }
 
-    save_config();
+    if (!dump_promo_mode) {
+        save_config();
+        platform_shutdown();
+    }
     free(canvas);
-    platform_shutdown();
     return 0;
 }

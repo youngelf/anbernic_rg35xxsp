@@ -59,21 +59,7 @@
  * 1. LOGICAL BUTTON BITMASK & INPUT STATE
  * ============================================================================ */
 
-#define BTN_UP        (1u << 0)
-#define BTN_DOWN      (1u << 1)
-#define BTN_LEFT      (1u << 2)
-#define BTN_RIGHT     (1u << 3)
-#define BTN_A         (1u << 4)
-#define BTN_B         (1u << 5)
-#define BTN_X         (1u << 6)
-#define BTN_Y         (1u << 7)
-#define BTN_L1        (1u << 8)
-#define BTN_R1        (1u << 9)
-#define BTN_L2        (1u << 10)
-#define BTN_R2        (1u << 11)
-#define BTN_SELECT    (1u << 12)
-#define BTN_START     (1u << 13)
-#define BTN_MENU      (1u << 14)
+#include "../rg35xxsp_input.h"
 
 typedef struct {
     uint32_t held;
@@ -695,59 +681,7 @@ static void platform_present(void) {
 }
 
 static uint32_t translate_x11_keysym(KeySym ks) {
-    switch (ks) {
-        case XK_Up:
-        case XK_KP_Up:        return BTN_UP;
-        case XK_Down:
-        case XK_KP_Down:      return BTN_DOWN;
-        case XK_Left:
-        case XK_KP_Left:      return BTN_LEFT;
-        case XK_Right:
-        case XK_KP_Right:     return BTN_RIGHT;
-        case XK_a:
-        case XK_A:
-        case XK_z:
-        case XK_Z:
-        case XK_space:
-        case XK_Alt_L:        return BTN_A;
-        case XK_b:
-        case XK_B:
-        case XK_Control_L:    return BTN_B;
-        case XK_x:
-        case XK_X:
-        case XK_Shift_L:      return BTN_X;
-        case XK_y:
-        case XK_Y:
-        case XK_h:
-        case XK_H:            return BTN_Y;
-        case XK_l:
-        case XK_L:
-        case XK_bracketleft:
-        case XK_Page_Down:    return BTN_L1;
-        case XK_r:
-        case XK_R:
-        case XK_bracketright:
-        case XK_BackSpace:
-        case XK_Page_Up:      return BTN_R1;
-        case XK_1:
-        case XK_t:
-        case XK_T:            return BTN_L2;
-        case XK_2:
-        case XK_p:
-        case XK_P:            return BTN_R2;
-        case XK_Tab:
-        case XK_c:
-        case XK_C:
-        case XK_Home:         return BTN_SELECT;
-        case XK_Return:
-        case XK_KP_Enter:     return BTN_START;
-        case XK_Escape:
-        case XK_q:
-        case XK_Q:
-        case XK_m:
-        case XK_M:            return BTN_MENU;
-        default:              return 0;
-    }
+    return rg35xxsp_map_x11_keysym(ks);
 }
 
 static uint32_t xkey_to_btn(XKeyEvent *xkey) {
@@ -1081,68 +1015,8 @@ static void platform_present(void) {
     ioctl(g_fb_fd, FBIOPAN_DISPLAY, &g_vinfo);
 }
 
-/*
- * Exact Anbernic RG 35xxSP evdev button mapping (Allwinner H700 sunxi-keys / Knulli):
- *   304 (BTN_SOUTH)  -> Physical A
- *   305 (BTN_EAST)   -> Physical B
- *   306 (BTN_C)      -> Physical X
- *   307 (BTN_NORTH)  -> Physical Y
- *   308 (BTN_WEST)   -> Physical L1
- *   309 (BTN_Z)      -> Physical R1
- *   310 (BTN_TL)     -> Physical SELECT (H700 ANBERNIC-keys)
- *   311 (BTN_TR)     -> Physical START  (H700 ANBERNIC-keys)
- *   312 (BTN_TL2)    -> Physical L2 / MENU
- *   313 (BTN_TR2)    -> Physical R2
- *   314 (BTN_SELECT) -> SELECT (Knulli virtual pad)
- *   315 (BTN_START)  -> START  (Knulli virtual pad)
- *   316 (BTN_MODE)   -> MENU (M button)
- */
 static uint32_t translate_rg35xxsp_evkey(uint16_t code) {
-    switch (code) {
-        case 304: return BTN_A;
-        case 305: return BTN_B;
-        case 306: return BTN_X;
-        case 307: return BTN_Y;
-        case 308: return BTN_L1;
-        case 309: return BTN_R1;
-        case 310: return BTN_SELECT;
-        case 311: return BTN_START;
-        case 312: return BTN_L2;
-        case 313: return BTN_R2;
-        case 314: return BTN_SELECT;
-        case 315: return BTN_START;
-        case 316: return BTN_MENU;
-        case 704:
-        case 705:
-        case 706: return BTN_MENU;
-        default:  break;
-    }
-    switch (code) {
-        case KEY_UP:
-        case BTN_DPAD_UP:    return BTN_UP;
-        case KEY_DOWN:
-        case BTN_DPAD_DOWN:  return BTN_DOWN;
-        case KEY_LEFT:
-        case BTN_DPAD_LEFT:  return BTN_LEFT;
-        case KEY_RIGHT:
-        case BTN_DPAD_RIGHT: return BTN_RIGHT;
-        case KEY_A:
-        case KEY_SPACE:      return BTN_A;
-        case KEY_B:          return BTN_B;
-        case KEY_X:          return BTN_X;
-        case KEY_Y:          return BTN_Y;
-        case KEY_L:
-        case KEY_TAB:        return BTN_L1;
-        case KEY_R:
-        case KEY_BACKSPACE:  return BTN_R1;
-        case KEY_SELECT:     return BTN_SELECT;
-        case KEY_ENTER:      return BTN_START;
-        case KEY_ESC:
-        case KEY_Q:
-        case KEY_M:
-        case KEY_MENU:       return BTN_MENU;
-        default:             return 0;
-    }
+    return rg35xxsp_map_evkey((int)code);
 }
 
 static bool platform_poll_input(input_state_t *out) {
@@ -1171,27 +1045,11 @@ static bool platform_poll_input(input_state_t *out) {
                     }
                 }
             } else if (ie.type == EV_ABS) {
-                if (ie.code == ABS_HAT0X) {
-                    int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
-                    if (val != g_evdevs[i].hat_x) {
-                        uint32_t old_lr = g_cur_buttons & (BTN_LEFT | BTN_RIGHT);
-                        uint32_t new_lr = (val < 0) ? BTN_LEFT : (val > 0) ? BTN_RIGHT : 0;
-                        pressed_latch  |= (new_lr & ~old_lr);
-                        released_latch |= (old_lr & ~new_lr);
-                        g_cur_buttons   = (g_cur_buttons & ~(BTN_LEFT | BTN_RIGHT)) | new_lr;
-                        g_evdevs[i].hat_x = val;
-                    }
-                } else if (ie.code == ABS_HAT0Y) {
-                    int val = (ie.value < 0) ? -1 : (ie.value > 0) ? 1 : 0;
-                    if (val != g_evdevs[i].hat_y) {
-                        uint32_t old_ud = g_cur_buttons & (BTN_UP | BTN_DOWN);
-                        uint32_t new_ud = (val < 0) ? BTN_UP : (val > 0) ? BTN_DOWN : 0;
-                        pressed_latch  |= (new_ud & ~old_ud);
-                        released_latch |= (old_ud & ~new_ud);
-                        g_cur_buttons   = (g_cur_buttons & ~(BTN_UP | BTN_DOWN)) | new_ud;
-                        g_evdevs[i].hat_y = val;
-                    }
-                }
+                uint32_t old_btns = g_cur_buttons;
+                uint32_t new_btns = rg35xxsp_update_evabs(old_btns, ie.code, ie.value, 0, 0);
+                pressed_latch  |= (new_btns & ~old_btns);
+                released_latch |= (old_btns & ~new_btns);
+                g_cur_buttons   = new_btns;
             }
         }
     }
@@ -2117,7 +1975,7 @@ static void render_help_modal(void) {
         { "B Button",     "Toggle Triads (C, Am, G) <-> 7ths (Cmaj7, Am7, G7)" },
         { "L1 / R1",      "Cycle Guitar Voicing (Open/CAGED, E-Barre, A-Barre)" },
         { "L2 / R2",      "L2: Timbre (Acoustic/Chorus/Nylon) | R2: Toggle Looper" },
-        { "SELECT / X",   "SELECT: Lock Key Center | X: Queue Chord | START: Quit" }
+        { "SELECT / X",   "SELECT: Lock Key Center | X: Queue Chord | MENU: Quit" }
     };
 
     for (int i = 0; i < 7; i++) {
@@ -2211,8 +2069,7 @@ int main(int argc, char *argv[]) {
         uint32_t now_ms = get_ticks_ms();
         uint32_t p = input.pressed;
 
-        if ((p & (BTN_START | BTN_MENU)) ||
-            ((input.held & BTN_START) && (input.held & BTN_SELECT))) {
+        if (p & BTN_MENU) {
             break;
         }
 
