@@ -2,6 +2,8 @@
 
 A precision C metronome built for the **Anbernic RG35XX SP** clamshell handheld running **Knulli (Scarab / Batocera)** (Allwinner H700 `aarch64`, **640×480** IPS display), plus a native **x86_64 Linux (X11)** target for desktop testing.
 
+![Metronome Screenshot](promo/metronome_grab.png)
+
 ## Features
 - **Native 640×480 Resolution**: Crisp 640×480 display output via Knulli's `libSDL2-2.0.so.0` (with automatic fallback to `/dev/fb0`).
 - **Maximum-Loudness Audio**: Full-scale (`±32767` rail-to-rail) saturated harmonic clicks across both stereo channels at 44.1 kHz via SDL2 Audio (with automatic ALSA `libasound.so.2` fallback). Use the RG35XX SP's physical side volume buttons (`VOL+` / `VOL-`) to adjust loudness.

@@ -2,6 +2,8 @@
 
 A Pomodoro work timer and work-hours tracker built from the unified `pomodoro.c` source for the **Anbernic RG35XX SP** clamshell handheld running **Knulli (Scarab / Batocera)** (Allwinner H700 `aarch64`, **640×480** IPS display), plus a native **x86_64 Linux (X11)** target for desktop testing.
 
+![Pomodoro Timer Screenshot](promo/pomodoro_grab.png)
+
 ## Features
 - **Native 640×480 Display**: Crisp 2× scaled UI (**640×480** 32-bit ARGB) rendered via Knulli's `libSDL2-2.0.so.0` (with automatic fallback to `/dev/fb0`).
 - **Clear Status Header**: Displays `"WORKING: DO NOT DISTURB"` centered in red when in Work mode, plus clear banners for Short Break, Long Break, Paused, and Completed states.

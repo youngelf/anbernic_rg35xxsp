@@ -33,7 +33,7 @@ TARGET      = boot_logo
 HOST_TARGET = boot_logo_linux
 SRCS        = boot_logo.c
 
-.PHONY: all rg35xxsp linux host run-linux package clean
+.PHONY: all rg35xxsp linux linux-x64 x64 host run-linux package clean
 
 # Default builds both the Anbernic RG35XXSP (aarch64) binary, Host (x86_64) binary, and SD card package
 all: $(TARGET) $(HOST_TARGET) package
@@ -42,6 +42,10 @@ rg35xxsp: $(TARGET)
 
 # Build x86_64 Linux binary for local testing/debugging
 linux: $(HOST_TARGET)
+
+linux-x64: $(HOST_TARGET)
+
+x64: $(HOST_TARGET)
 
 host: $(HOST_TARGET)
 
