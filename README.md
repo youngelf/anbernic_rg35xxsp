@@ -44,7 +44,7 @@ A surgical boot logo modifier for Knulli Scarab on the RG 35xxSP that previews 4
 
 ## [ChordWheel](chordwheel/)
 
-An interactive Circle of Fifths, harmonic function wheel, guitar chord voicing inspector, and 4-bar progression looper rendered natively at `640x480` with a background 44.1 kHz floating-point Extended Karplus-Strong (EKS) 6-string guitar synthesizer (`Acoustic`, `Chorus Electric`, and `Nylon Arpeggio` timbres) and real-time stereo oscilloscope.
+An interactive Circle of Fifths, harmonic function wheel, guitar chord voicing inspector, and 4-bar progression looper rendered natively at `640x480` with a background 44.1 kHz floating-point Extended Karplus-Strong (EKS) 6-string guitar synthesizer (`Acoustic`, `Chorus Electric`, and `Nylon Arpeggio` timbres).
 
 | Diatonic Triads & Guitar Voicing (`Key of C`) | Diatonic 7th Chords (`Key of G`, `Chorus El`) |
 | :---: | :---: |
