@@ -9,7 +9,7 @@
  *   A Button (or B / Space / 'A')   : Play / Pause metronome
  *   D-Pad UP / DOWN                 : Increase / Decrease Tempo (BPM)
  *   D-Pad LEFT / RIGHT              : Cycle Time Signature (4/4, 3/4, 2/4, 5/4, 7/4)
- *   L1 / R1 Shoulder Buttons        : Jump Tempo -5 / +5 BPM
+ *   L1 / R1 Shoulder Buttons        : Decrease / Increase Click Drop-Rate by 5% (0%..100%)
  *   X / Y Buttons ('R' on Linux)    : Reset Tempo to 120 BPM
  *   MENU (M) / SELECT / START+SELECT: Save settings & Exit to Knulli
  */
@@ -54,8 +54,8 @@ typedef enum {
     ACT_PLAY_PAUSE,
     ACT_BPM_UP,
     ACT_BPM_DOWN,
-    ACT_BPM_UP_FAST,
-    ACT_BPM_DOWN_FAST,
+    ACT_DROP_UP,
+    ACT_DROP_DOWN,
     ACT_SIG_PREV,
     ACT_SIG_NEXT,
     ACT_RESET_BPM,
@@ -81,7 +81,10 @@ static inline uint32_t make_rgb(uint8_t r, uint8_t g, uint8_t b) {
  * ========================================================================= */
 static volatile int g_bpm = DEFAULT_BPM;
 static volatile int g_time_sig_idx = 0;
+static volatile int g_drop_pct = 0;     /* Click drop-rate (0% .. 100%, step 5%), starts at 0% */
 static volatile bool g_playing = false;
+
+#define LOCK_IN_MEASURES 4
 
 static volatile int g_click_samples_left = 0;
 static volatile bool g_click_is_accent = false;
@@ -95,6 +98,23 @@ static void trigger_click(bool accent) {
     g_click_sample_pos = 0;
     int duration_ms = accent ? ACCENT_CLICK_MS : NORMAL_CLICK_MS;
     g_click_samples_left = (SAMPLE_RATE * duration_ms) / 1000;
+}
+
+/* Play click unless dropped:
+ * - First 4 measures (measure_count < 4) always play 100% of clicks to lock in the beat.
+ * - Thereafter, drop clicks with probability g_drop_pct% (UI updates normally, sound omitted).
+ */
+static void maybe_trigger_click(bool accent, int measure_count, int drop_pct) {
+    if (measure_count < LOCK_IN_MEASURES || drop_pct <= 0) {
+        trigger_click(accent);
+        return;
+    }
+    if (drop_pct >= 100) {
+        return;
+    }
+    if ((rand() % 100) >= drop_pct) {
+        trigger_click(accent);
+    }
 }
 
 static void audio_callback(void *userdata, uint8_t *stream, int len) {
@@ -318,11 +338,11 @@ static InputAction platform_poll_input(void) {
                 case XK_Page_Up:
                 case XK_BackSpace:
                 case XK_bracketright:
-                    return ACT_BPM_UP_FAST;
+                    return ACT_DROP_UP;
                 case XK_Page_Down:
                 case XK_Tab:
                 case XK_bracketleft:
-                    return ACT_BPM_DOWN_FAST;
+                    return ACT_DROP_DOWN;
                 case XK_r:
                 case XK_x:
                 case XK_y:
@@ -716,14 +736,14 @@ static InputAction platform_poll_input(void) {
                     case KEY_RIGHT:
                         return ACT_SIG_NEXT;
 
-                    /* Shoulder Buttons L1 / R1 -> Tempo -5 / +5 BPM */
+                    /* Shoulder Buttons L1 / R1 -> Click Drop-Rate -5% / +5% */
                     case 308:        /* BTN_WEST (Physical L1 on H700) */
                     case KEY_TAB:
-                        return ACT_BPM_DOWN_FAST;
+                        return ACT_DROP_DOWN;
                     case 309:        /* BTN_Z    (Physical R1 on H700) */
                     case 311:        /* BTN_TR   (R1 on standard gamepad) */
                     case KEY_BACKSPACE:
-                        return ACT_BPM_UP_FAST;
+                        return ACT_DROP_UP;
 
                     /* Menu (M) button or SELECT -> Save & Quit */
                     case 310:        /* BTN_TL     (Physical SELECT on H700 ANBERNIC-keys) */
@@ -1032,8 +1052,10 @@ int main(int argc, char *argv[]) {
     (void)argc;
     (void)argv;
 
+    srand((unsigned int)time(NULL) ^ (unsigned int)getpid());
     resolve_config_path();
     load_config();
+    g_drop_pct = 0; /* Always start at 0% drop-rate so all clicks are played */
 
     if (!platform_init()) {
         return 1;
@@ -1055,7 +1077,8 @@ int main(int argc, char *argv[]) {
     uint32_t col_box_idle   = make_rgb(36, 44, 66);
 
     bool running = true;
-    int current_beat = 0; /* 0 .. beats_per_bar - 1 */
+    int current_beat = 0;  /* 0 .. beats_per_bar - 1 */
+    int measure_count = 0; /* Measures elapsed since start (0..3 = 4-measure lock-in) */
     double next_beat_time_ms = 0.0;
     uint32_t last_beat_trigger_ms = 0;
 
@@ -1069,7 +1092,8 @@ int main(int argc, char *argv[]) {
                     g_playing = !g_playing;
                     if (g_playing) {
                         current_beat = 0;
-                        trigger_click(true);
+                        measure_count = 0;
+                        maybe_trigger_click(true, measure_count, g_drop_pct);
                         last_beat_trigger_ms = now_ms;
                         next_beat_time_ms = (double)now_ms + (60000.0 / (double)g_bpm);
                     } else {
@@ -1091,23 +1115,22 @@ int main(int argc, char *argv[]) {
                     }
                     break;
 
-                case ACT_BPM_UP_FAST:
-                    g_bpm += 5;
-                    if (g_bpm > MAX_BPM) g_bpm = MAX_BPM;
-                    save_config();
+                case ACT_DROP_UP:
+                    g_drop_pct += 5;
+                    if (g_drop_pct > 100) g_drop_pct = 100;
                     break;
 
-                case ACT_BPM_DOWN_FAST:
-                    g_bpm -= 5;
-                    if (g_bpm < MIN_BPM) g_bpm = MIN_BPM;
-                    save_config();
+                case ACT_DROP_DOWN:
+                    g_drop_pct -= 5;
+                    if (g_drop_pct < 0) g_drop_pct = 0;
                     break;
 
                 case ACT_SIG_PREV:
                     g_time_sig_idx = (g_time_sig_idx + NUM_TIME_SIGS - 1) % NUM_TIME_SIGS;
                     current_beat = 0;
+                    measure_count = 0;
                     if (g_playing) {
-                        trigger_click(true);
+                        maybe_trigger_click(true, measure_count, g_drop_pct);
                         last_beat_trigger_ms = now_ms;
                         next_beat_time_ms = (double)now_ms + (60000.0 / (double)g_bpm);
                     }
@@ -1117,8 +1140,9 @@ int main(int argc, char *argv[]) {
                 case ACT_SIG_NEXT:
                     g_time_sig_idx = (g_time_sig_idx + 1) % NUM_TIME_SIGS;
                     current_beat = 0;
+                    measure_count = 0;
                     if (g_playing) {
-                        trigger_click(true);
+                        maybe_trigger_click(true, measure_count, g_drop_pct);
                         last_beat_trigger_ms = now_ms;
                         next_beat_time_ms = (double)now_ms + (60000.0 / (double)g_bpm);
                     }
@@ -1147,8 +1171,11 @@ int main(int argc, char *argv[]) {
         if (g_playing) {
             if ((double)now_ms >= next_beat_time_ms) {
                 current_beat = (current_beat + 1) % beats_per_bar;
+                if (current_beat == 0) {
+                    measure_count++;
+                }
                 bool is_accent = (current_beat == 0);
-                trigger_click(is_accent);
+                maybe_trigger_click(is_accent, measure_count, g_drop_pct);
                 last_beat_trigger_ms = now_ms;
                 next_beat_time_ms += interval_ms;
                 if ((double)now_ms - next_beat_time_ms > interval_ms) {
@@ -1207,8 +1234,8 @@ int main(int argc, char *argv[]) {
         if (box_w > 48) box_w = 48;
         int total_boxes_w = box_w * beats_per_bar + gap * (beats_per_bar - 1);
         int start_x = 12 + (296 - total_boxes_w) / 2;
-        int box_y = 146;
-        int box_h = 42;
+        int box_y = 142;
+        int box_h = 36;
 
         bool beat_flash = g_playing && ((now_ms - last_beat_trigger_ms) < (uint32_t)(interval_ms * 0.55));
 
@@ -1230,16 +1257,22 @@ int main(int argc, char *argv[]) {
             char num_str[16];
             snprintf(num_str, sizeof(num_str), "%d", b + 1);
             uint32_t num_col = is_active ? col_bg : ((b == 0) ? col_accent : col_white);
-            draw_text_centered(canvas, bx + box_w / 2, box_y + 10, num_str, 2, num_col);
+            draw_text_centered(canvas, bx + box_w / 2, box_y + 6, num_str, 2, num_col);
 
             if (b == 0) {
-                draw_text_centered(canvas, bx + box_w / 2, box_y + 29, "ACC", 1,
+                draw_text_centered(canvas, bx + box_w / 2, box_y + 24, "ACC", 1,
                                    is_active ? col_bg : col_accent);
             }
         }
 
-        /* Pendulum / Phase Progress Bar inside Beat Panel (y: 194..202) */
-        int pbar_x = 24, pbar_y = 194, pbar_w = 272, pbar_h = 6;
+        /* Single drop% indicator below the beat markings */
+        char drop_str[32];
+        snprintf(drop_str, sizeof(drop_str), "DROP: %d%%", g_drop_pct);
+        draw_text_centered(canvas, CANVAS_W / 2, 183, drop_str, 1,
+                           (g_drop_pct > 0) ? col_gold : col_muted);
+
+        /* Pendulum / Phase Progress Bar inside Beat Panel (y: 195..201) */
+        int pbar_x = 24, pbar_y = 195, pbar_w = 272, pbar_h = 6;
         draw_rect(canvas, pbar_x, pbar_y, pbar_w, pbar_h, col_bg);
         if (g_playing && interval_ms > 0.0) {
             double elapsed = (double)(now_ms - last_beat_trigger_ms);
