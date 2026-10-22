@@ -181,6 +181,9 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
     }
 }
 
+static bool g_up_held = false;
+static bool g_down_held = false;
+
 static InputAction mask_to_action(uint32_t mask) {
     if (mask & BTN_MENU)  return ACT_QUIT;
     if (mask & BTN_Y)     return ACT_HELP;
@@ -335,9 +338,25 @@ static InputAction platform_poll_input(void) {
             if ((Atom)xev.xclient.data.l[0] == g_wm_delete_window) {
                 return ACT_QUIT;
             }
+        } else if (xev.type == KeyRelease) {
+            if (XEventsQueued(g_x11_dpy, QueuedAfterReading)) {
+                XEvent nev;
+                XPeekEvent(g_x11_dpy, &nev);
+                if (nev.type == KeyPress && nev.xkey.time == xev.xkey.time &&
+                    nev.xkey.keycode == xev.xkey.keycode) {
+                    XNextEvent(g_x11_dpy, &nev);
+                    continue;
+                }
+            }
+            KeySym ks = XLookupKeysym(&xev.xkey, 0);
+            uint32_t mask = rg35xxsp_map_x11_keysym((unsigned long)ks);
+            if (mask & BTN_UP)   g_up_held = false;
+            if (mask & BTN_DOWN) g_down_held = false;
         } else if (xev.type == KeyPress) {
             KeySym ks = XLookupKeysym(&xev.xkey, 0);
             uint32_t mask = rg35xxsp_map_x11_keysym((unsigned long)ks);
+            if (mask & BTN_UP)   { g_up_held = true;   g_down_held = false; }
+            if (mask & BTN_DOWN) { g_down_held = true; g_up_held = false;   }
             InputAction act = mask_to_action(mask);
             if (act != ACT_NONE) return act;
         }
@@ -678,8 +697,15 @@ static InputAction platform_poll_input(void) {
         struct input_event ie;
         while (read(g_evdev_fds[i], &ie, sizeof(ie)) == (ssize_t)sizeof(ie)) {
             if (ie.type == EV_KEY) {
-                if (ie.value != 1) continue; /* 1 = key press */
                 uint32_t mask = rg35xxsp_map_evkey(ie.code);
+                if (ie.value == 0) {
+                    if (mask & BTN_UP)   g_up_held = false;
+                    if (mask & BTN_DOWN) g_down_held = false;
+                    continue;
+                }
+                if (ie.value != 1) continue; /* 1 = key press */
+                if (mask & BTN_UP)   { g_up_held = true;   g_down_held = false; }
+                if (mask & BTN_DOWN) { g_down_held = true; g_up_held = false;   }
                 InputAction act = mask_to_action(mask);
                 if (act != ACT_NONE) return act;
             } else if (ie.type == EV_ABS) {
@@ -692,6 +718,8 @@ static InputAction platform_poll_input(void) {
                 } else if (ie.code == 17 || ie.code == 1 || ie.code == 4) {
                     int prev = g_hat_y;
                     g_hat_y = ie.value;
+                    g_up_held   = (g_hat_y < 0);
+                    g_down_held = (g_hat_y > 0);
                     if (g_hat_y < 0 && prev >= 0) return ACT_BPM_UP;
                     if (g_hat_y > 0 && prev <= 0) return ACT_BPM_DOWN;
                 }
@@ -991,6 +1019,8 @@ int main(int argc, char *argv[]) {
     int measure_count = 0; /* Measures elapsed since start (0..3 = 4-measure lock-in) */
     double next_beat_time_ms = 0.0;
     uint32_t last_beat_trigger_ms = 0;
+    uint32_t hold_start_ms = 0;
+    uint32_t last_repeat_ms = 0;
 
     while (running) {
         uint32_t now_ms = get_ticks_ms();
@@ -1028,6 +1058,8 @@ int main(int argc, char *argv[]) {
                     break;
 
                 case ACT_BPM_UP:
+                    hold_start_ms  = now_ms;
+                    last_repeat_ms = now_ms;
                     if (g_bpm < MAX_BPM) {
                         g_bpm++;
                         save_config();
@@ -1035,6 +1067,8 @@ int main(int argc, char *argv[]) {
                     break;
 
                 case ACT_BPM_DOWN:
+                    hold_start_ms  = now_ms;
+                    last_repeat_ms = now_ms;
                     if (g_bpm > MIN_BPM) {
                         g_bpm--;
                         save_config();
@@ -1084,6 +1118,22 @@ int main(int argc, char *argv[]) {
                     break;
             }
         }
+
+            /* Continuous tempo change when D-Pad UP or DOWN is held */
+            if (!show_help && (g_up_held || g_down_held)) {
+                uint32_t held_dur = now_ms - hold_start_ms;
+                uint32_t rep_interval = (held_dur > 1000) ? 30 : 65;
+                if (held_dur >= 240 && (now_ms - last_repeat_ms) >= rep_interval) {
+                    last_repeat_ms = now_ms;
+                    if (g_up_held && g_bpm < MAX_BPM) {
+                        g_bpm++;
+                        save_config();
+                    } else if (g_down_held && g_bpm > MIN_BPM) {
+                        g_bpm--;
+                        save_config();
+                    }
+                }
+            }
         } else {
             g_bpm = 120;
             g_time_sig_idx = 0;

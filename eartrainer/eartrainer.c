@@ -1097,7 +1097,6 @@ static ChordStyle    g_chd_style     = CHD_STYLE_ARP_STRUM;
 static SynthTimbre   g_timbre        = TIMBRE_ACOUSTIC;
 static int           g_tier          = 2; /* Default: ALL 12 */
 static bool          g_show_help     = false;
-static bool          g_show_hints    = true;
 
 /* Current question state */
 static int           g_root_str      = 0;
@@ -1552,9 +1551,8 @@ static void render_fretboard_and_inspector(void) {
             char t_name[16];
             format_midi_note(g_root_midi + id->semitones, t_name, sizeof(t_name));
             char nline[64];
-            snprintf(nline, sizeof(nline), "%s -> %s  (%s)", root_name, t_name, id->sub_label);
-            draw_text(FONT_UI_13, ix + 10, iy + 68, nline, RGB(250, 204, 21));
-            draw_text(FONT_UI_13, ix + 10, iy + 96, id->mnemonic, RGB(147, 197, 253));
+            snprintf(nline, sizeof(nline), "%s -> %s", root_name, t_name);
+            draw_text(FONT_UI_16, ix + 10, iy + 72, nline, RGB(250, 204, 21));
         } else {
             const ChordDef *cd = &k_chords[shown_idx];
             char cname[48];
@@ -1592,33 +1590,23 @@ static void render_keypad_grid(void) {
             uint32_t fill_col = RGB(26, 36, 56);
             uint32_t bdr_col  = RGB(56, 74, 106);
             uint32_t txt_col  = RGB(248, 250, 252);
-            uint32_t sub_col  = RGB(148, 163, 184);
-            uint32_t mn_col   = RGB(125, 211, 252);
 
             if (!enabled) {
                 fill_col = RGB(14, 19, 30);
                 bdr_col  = RGB(28, 36, 52);
                 txt_col  = RGB(58, 70, 90);
-                sub_col  = RGB(45, 55, 72);
-                mn_col   = RGB(45, 55, 72);
             } else if (is_ans) {
                 fill_col = RGB(6, 118, 82);
                 bdr_col  = RGB(52, 211, 153);
                 txt_col  = RGB(255, 255, 255);
-                sub_col  = RGB(209, 250, 229);
-                mn_col   = RGB(254, 240, 138);
             } else if (wrong) {
                 fill_col = RGB(122, 26, 26);
                 bdr_col  = RGB(248, 113, 113);
                 txt_col  = RGB(254, 202, 202);
-                sub_col  = RGB(252, 165, 165);
-                mn_col   = RGB(252, 165, 165);
             } else if (is_aud) {
                 fill_col = RGB(29, 78, 216);
                 bdr_col  = RGB(96, 165, 250);
                 txt_col  = RGB(255, 255, 255);
-                sub_col  = RGB(191, 219, 254);
-                mn_col   = RGB(254, 240, 138);
             }
 
             fill_rect(bx, by, bw, bh, fill_col);
@@ -1626,10 +1614,6 @@ static void render_keypad_grid(void) {
 
             const char *main_lbl = (g_mode == MODE_INTERVALS) ? k_intervals[idx].short_name
                                                               : k_chords[idx].short_name;
-            const char *sub_lbl  = (g_mode == MODE_INTERVALS) ? k_intervals[idx].sub_label
-                                                              : k_chords[idx].formula;
-            const char *hint_lbl = (g_mode == MODE_INTERVALS) ? k_intervals[idx].mnemonic
-                                                              : k_chords[idx].full_name;
 
             /* Top-right accuracy badge if practiced */
             uint32_t ok  = (g_mode == MODE_INTERVALS) ? g_int_ok[idx]  : g_chd_ok[idx];
@@ -1641,13 +1625,7 @@ static void render_keypad_grid(void) {
                                 is_ans ? RGB(254, 240, 138) : RGB(148, 163, 184));
             }
 
-            draw_text_centered(FONT_UI_20, bx, by + 3, bw, 24, main_lbl, txt_col);
-            if (g_show_hints) {
-                draw_text_centered(FONT_UI_11, bx, by + 28, bw, 16, sub_lbl, sub_col);
-                draw_text_centered(FONT_UI_11, bx, by + 45, bw, 16, hint_lbl, mn_col);
-            } else {
-                draw_text_centered(FONT_UI_13, bx, by + 36, bw, 20, sub_lbl, sub_col);
-            }
+            draw_text_centered(FONT_TITLE_28, bx, by, bw, bh, main_lbl, txt_col);
         }
     }
 }
@@ -1658,8 +1636,8 @@ static void render_bottom_footer(void) {
     fill_rect(0, fy, NATIVE_W, 2, RGB(51, 65, 85));
 
     const char *msg = g_revealed
-        ? "A: Next   |   B: Replay   |   X: Audition & Compare   |   R2: Hints   |   Y: Stats"
-        : "A: Guess (3 Tries)   |   B: Replay   |   X: Root Note   |   R2: Hints   |   Y: Stats";
+        ? "A: Next   |   B: Replay   |   X: Audition & Compare   |   Y: Help & Stats   |   MENU: Exit"
+        : "A: Guess (3 Tries)   |   B: Replay   |   X: Root Note   |   Y: Help & Stats   |   MENU: Exit";
     draw_text_centered(FONT_UI_13, 0, fy + 4, NATIVE_W, fh - 4, msg, RGB(186, 230, 253));
 }
 
@@ -1718,7 +1696,7 @@ static void render_help_stats_modal(void) {
         { "X Button",      "Play Root (Guessing)  |  Audition & Compare (Revealed)" },
         { "SELECT",        "Switch Mode: INTERVALS (m2..P8) <-> CHORDS (12 Types)" },
         { "L1 / R1",       "L1: Play Style (ASC/DESC/HARM/MIX)  |  R1: Difficulty" },
-        { "L2 / R2",       "L2: Timbre (Acoustic/Chorus/Bell)  |  R2: Toggle Hints" },
+        { "L2 Trigger",    "L2: Cycle Timbre (Acoustic / Chorus El / Pure Bell)" },
         { "MENU / Y",      "MENU: Save Stats & Exit  |  Y: Toggle Help & Stats" }
     };
 
@@ -1894,8 +1872,6 @@ int main(int argc, char *argv[]) {
                 g_timbre = (SynthTimbre)((g_timbre + 1) % 3);
                 save_stats();
                 play_item_audio(g_revealed ? g_audition_idx : g_correct_idx);
-            } else if (pressed & BTN_R2) {
-                g_show_hints = !g_show_hints;
             }
         }
 
