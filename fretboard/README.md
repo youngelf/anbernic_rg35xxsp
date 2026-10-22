@@ -22,12 +22,12 @@ An interactive 15-fret guitar neck encyclopedia, CAGED scale box visualizer, cho
    - Replaces the V90's fixed-point 16-bit synthesizer with a 6-string 32-bit `float` Extended Karplus-Strong waveguide synthesizer featuring **first-order Thiran all-pass fractional delay interpolation** (eliminating high-fret pitch quantization up to Fret 15), **pick-position comb filtering**, **dual-biquad acoustic body resonance**, **3 selectable guitar timbres (`L2`)** (*Warm Acoustic*, *Chorus Electric*, and *Tube Overdrive*), and **stereo chorus / room ambience**.
 2. **Asynchronous Background Audio Thread**:
    - All scale box runs, chord strums, arpeggio cascades, and single-string plucks are posted via a lock-free atomic ring buffer (`g_cmd_ring`) and synthesized entirely on a dedicated background audio thread, keeping the `640×480` UI thread at a rock-solid 60 FPS.
-3. **Native `640×480` Resolution & Live Vibrating String Physics**:
-   - Renders a full **15-fret rosewood fingerboard (`Frets 0–15`)** with pearloid inlays (`3, 5, 7, 9, 12, 15`), string gauge shading, real-time vibrating string waveforms, and a live stereo oscilloscope in the upper-right theory card.
+3. **Native `640×480` Resolution**:
+   - Renders a full **15-fret rosewood fingerboard (`Frets 0–15`)** with pearloid inlays (`3, 5, 7, 9, 12, 15`), string gauge shading, and a dedicated upper-right theory & interval spelling card.
    - Displays both the active chord voicing (`F1..F4` fingerings or note names) and the full-neck underlying arpeggio tones simultaneously in **Chords & Arpeggios** mode.
    - Supports **6 guitar tunings (`R2` or inside `Y` Help)**: *Standard (`E A D G B e`)*, *Drop D (`D A D G B e`)*, *Eb Standard*, *D Standard*, *DADGAD*, and *Open G (`D G D G B D`)*.
 4. **Native RG35XXSP Hardware Controls + Desktop Keyboard Parity**:
-   - Maps all RG35XXSP `evdev` buttons (`A=304`, `B=305`, `X=306`, `Y=307`, `L1=308`, `R1=309`, `SELECT=310/314`, `START=311/315`, `L2=312`, `R2=313`) and matching desktop X11 keys (`A`, `B`, `X`, `Y`, `L`/`R`, `1`/`2`, `Tab`, `Enter`, and cursor keys).
+   - Maps all RG35XXSP `evdev` buttons (`A=304`, `B=305`, `Y=306`, `X=307`, `L1=308`, `R1=309`, `SELECT=310`, `START=311`, `L2=312`, `R2=313`, `MENU=316`) and matching desktop X11 keys (`A`, `B`, `X`, `Y`, `L`/`R`, `1`/`2`, `Tab`, `Enter`, and cursor keys).
 
 ---
 

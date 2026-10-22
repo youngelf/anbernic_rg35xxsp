@@ -30,11 +30,11 @@ Plug the RG35XXSP's 3.5mm audio output into your guitar amp's AUX input (or head
 2. **Asynchronous Background Audio Thread**:
    - All sequencer timing, voice triggering, floating-point synthesis, and stereo bus mixing run inside a dedicated background audio thread (`audio_thread_worker`) so the `640×480` UI thread never blocks or drops below 60 FPS.
 3. **Native `640×480` IPS Display Layout**:
-   - **Live Per-Track VU Meters (`KCK`, `SNR`, `HAT`, `BAS`, `CMP`)** and a real-time **Stereo Output Oscilloscope**.
+   - **Live Per-Track VU Meters (`KCK`, `SNR`, `HAT`, `BAS`, `CMP`)** and a chord progression & groove inspector card.
    - **12-Fret Rosewood Soloing Scale Map** with labeled anti-aliased dots that toggle between **Intervals (`R, b3, 4, b5, 5, b7`)** and **Note Names (`A, C, D, Eb, E, G`)** via **`L2`**.
    - **5-Track Step Editor (`SELECT`)** that displays both the scale degree (`R, 3, 5, 6, b7, 8`) and the live transposed note name (`E, B`, etc.) inside every bass step cell.
 4. **Native RG35XXSP Hardware Controls + Desktop Keyboard Parity**:
-   - Maps all RG35XXSP `evdev` buttons (`A=304`, `B=305`, `X=306`, `Y=307`, `L1=308`, `R1=309`, `SELECT=310/314`, `START=311/315`, `L2=312`, `R2=313`) and matching desktop X11 keys (`A`, `B`, `X`, `Y`, `L`/`R`, `1`/`2`, `Tab`, `Enter`, and cursor keys).
+   - Maps all RG35XXSP `evdev` buttons (`A=304`, `B=305`, `Y=306`, `X=307`, `L1=308`, `R1=309`, `SELECT=310`, `START=311`, `L2=312`, `R2=313`, `MENU=316`) and matching desktop X11 keys (`A`, `B`, `X`, `Y`, `L`/`R`, `1`/`2`, `Tab`, `Enter`, and cursor keys).
 
 ---
 

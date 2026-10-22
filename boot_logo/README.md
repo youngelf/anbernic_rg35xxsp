@@ -37,10 +37,10 @@ Every `.bmp` file in `logos/` and `backup/` is formatted to match Knulli Scarab'
 | :--- | :--- |
 | **D-Pad Up / Down / Left / Right** (or Arrow Keys) | Cycle through the 5 boot logo themes |
 | **Button A** (or `A` / `Space` / `Z`) | Open **Flash Boot Logo** confirmation modal; press **A** again to flash & verify |
-| **Button B** (or `B` / `Backspace`) | Open **Revert to Stock** confirmation modal; press **A** to restore factory `bootlogo.bmp` |
-| **Button Y / X** (or `Y` / `X`) | Toggle unobstructed **1:1 Full-Screen `640x480` View** (hides top/bottom HUD bars) |
-| **Button R1** (or `R` / `E`) | Toggle **Controls Help** overlay; press **R1** again to resume |
-| **MENU** (or `Esc` on Desktop) | Exit Boot Logo Customizer |
+| **Button B** (or `B`) | Open **Revert to Stock** confirmation modal; press **A** to restore factory `bootlogo.bmp` (or cancel modal) |
+| **Button SELECT** (or `Tab` / `Backspace`) | Toggle unobstructed **1:1 Full-Screen `640x480` View** (hides top/bottom HUD bars) |
+| **Button Y** (or `Y` / `H`) | Toggle **Controls Help** overlay; press **Y** or **B** to resume |
+| **MENU** (or `Esc` / `Q` on Desktop) | Exit Boot Logo Customizer |
 
 ---
 

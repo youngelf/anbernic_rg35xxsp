@@ -62,7 +62,7 @@ A guitar ear-training trainer for intervals (`12` intervals across `Easy`, `Medi
 
 ## [Fretboard](fretboard/)
 
-An interactive 15-fret guitar neck encyclopedia (`Frets 0–15`), 5-position CAGED scale box visualizer, chord-voicing browser, and reverse chord finder supporting `6` guitar tunings (`Standard`, `Drop D`, `Eb`, `D Std`, `DADGAD`, `Open G`), live vibrating string animations, and a background 44.1 kHz floating-point EKS guitar synthesizer.
+An interactive 15-fret guitar neck encyclopedia (`Frets 0–15`), 5-position CAGED scale box visualizer, chord-voicing browser, and reverse chord finder supporting `6` guitar tunings (`Standard`, `Drop D`, `Eb`, `D Std`, `DADGAD`, `Open G`) and a background 44.1 kHz floating-point EKS guitar synthesizer.
 
 | Scales & CAGED Box View (`A Blues`, POS 1) | Chords & Arpeggios View (`Cmaj7`, Voicing 2) |
 | :---: | :---: |
@@ -71,7 +71,7 @@ An interactive 15-fret guitar neck encyclopedia (`Frets 0–15`), 5-position CAG
 
 ## [PocketBand](pocketband/)
 
-A 5-track drum machine, walking bassline sequencer, stereo chord-comping backing band, and 12-fret guitar soloing map (`Blues`, `Rock`, and `Jazz` in `4/4` and `3/4`) powered by a background 44.1 kHz floating-point multi-track synthesizer with live per-track VU meters and stereo waveform scope.
+A 5-track drum machine, walking bassline sequencer, stereo chord-comping backing band, and 12-fret guitar soloing map (`Blues`, `Rock`, and `Jazz` in `4/4` and `3/4`) powered by a background 44.1 kHz floating-point multi-track synthesizer with live per-track VU meters.
 
 | Guitarist Jam View (`Blues Shuffle 4/4`) | 5-Track Step & Bassline Editor (`Classic Rock 4/4`) |
 | :---: | :---: |

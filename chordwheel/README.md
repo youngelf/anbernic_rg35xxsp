@@ -34,7 +34,7 @@ An interactive **Circle of Fifths, Diatonic Harmony Explorer, CAGED Guitar Voici
      2. **Interactive 6-String Rosewood Fretboard**: Displays **3 movable voicings per chord (`L1`/`R1`)** (Open/CAGED, 6-string E-shape barre, 5-string A-shape barre) centered with wide 40 px string spacing and color-coded interval badges (`R`, `3`/`b3`, `5`/`b5`, `7`/`b7`).
      3. **Diatonic Scale Strip (`I` – `vii°`) & 4-Bar Progression Bar**: Highlights all 7 diatonic chords in the active key at a glance alongside the 4-slot progression looper bar at the bottom.
 4. **Hardware-Accurate RG 35xxSP & Desktop Keyboard Controls**:
-   - Supports the Anbernic RG 35xxSP's `evdev` keycodes (`304`=A, `305`=B, `306`=X, `307`=Y, `308`=L1, `309`=R1, `310`/`314`=SELECT, `311`/`315`=START, `312`=L2, `313`=R2) as well as intuitive desktop keyboard keys (`A`, `B`, `X`, `Y`, `L`, `R`, `1`, `2`, `Tab`, `Enter`, cursor arrows) in `chordwheel_linux`.
+   - Supports the Anbernic RG 35xxSP's `evdev` keycodes (`304`=A, `305`=B, `306`=Y, `307`=X, `308`=L1, `309`=R1, `310`=SELECT, `311`=START, `312`=L2, `313`=R2, `316`=MENU) as well as intuitive desktop keyboard keys (`A`, `B`, `X`, `Y`, `L`, `R`, `1`, `2`, `Tab`, `Enter`, cursor arrows) in `chordwheel_linux`.
 
 ---
 

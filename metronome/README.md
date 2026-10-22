@@ -17,12 +17,13 @@ A precision C metronome built for the **Anbernic RG35XX SP** clamshell handheld 
 
 | Action | Anbernic RG35XX SP Button | Linux Desktop Key |
 | :--- | :--- | :--- |
-| **Play / Pause** | **A** (or **B**) | `A`, `Space`, `Enter`, or `Left Alt` |
-| **Increase / Decrease Tempo (±1 BPM)** | **D-Pad UP** / **DOWN** | `Up Arrow` / `Down Arrow` |
+| **Play / Pause** | **A** | `A`, `Space`, `Enter`, or `Left Alt` |
+| **Random Beat Drop (`0%`, `15%`, `30%`, `50%`)** | **B** | `B` or `Left Ctrl` |
+| **Increase / Decrease Tempo (±1 BPM, hold for continuous)** | **D-Pad UP** / **DOWN** | `Up Arrow` / `Down Arrow` |
 | **Cycle Time Signature (`4/4`, `3/4`, `2/4`, `5/4`, `7/4`)** | **D-Pad LEFT** / **RIGHT** | `Left Arrow` / `Right Arrow` |
 | **Fast Tempo Step (±5 BPM)** | **R1 / R2** (+5) and **L1 / L2** (-5) | `Page Up` / `Page Down` or `]` / `[` |
-| **Reset to 120 BPM** | **X** or **Y** | `R`, `X`, or `Y` |
-| **Save & Quit to Knulli** | **MENU (`M`)**, **SELECT**, or **START + SELECT** | `Q` or `ESC` |
+| **Reset to 120 BPM** | **X** | `R` or `X` |
+| **Save & Quit to Knulli** | **MENU (`M`)** | `Q` or `ESC` |
 
 ---
 

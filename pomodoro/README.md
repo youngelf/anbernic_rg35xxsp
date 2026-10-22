@@ -19,12 +19,12 @@ A Pomodoro work timer and work-hours tracker built from the unified `pomodoro.c`
 | Action | Anbernic RG35XX SP Button | Linux Desktop Key |
 | :--- | :--- | :--- |
 | **Toggle Start / Stop (Pause)** | **A Button** | `A`, `Space`, or `Left Alt` |
-| **Switch Mode** (`Work` / `Short Break` / `Long Break`) | **X Button** or **D-Pad LEFT / RIGHT** | `X`, `Left Shift`, or `Left` / `Right Arrow` |
-| **Reset Current Timer** | **Y Button** | `Y` or `R` |
+| **Switch Mode** (`Work` / `Short Break` / `Long Break`) | **SELECT** or **D-Pad LEFT / RIGHT** | `Tab`, `Backspace`, or `Left` / `Right Arrow` |
+| **Reset Current Timer** | **X Button** | `X` or `R` |
 | **Stop / Pause Timer** | **B Button** | `B` or `Left Ctrl` |
-| **Adjust Duration (±1 min while stopped)** | **D-Pad UP / DOWN** or **R1 / L1** | `Up` / `Down Arrow` or `Backspace` / `Tab` |
+| **Adjust Duration (±1 min while stopped)** | **D-Pad UP / DOWN** or **R1 / L1** | `Up` / `Down Arrow` or `]` / `[` |
 | **Fast Adjust Duration (±5 min while stopped)** | **R2 / L2** | `Page Down` / `Page Up` |
-| **Save & Exit to Knulli** | **SELECT**, **MENU (`M`)**, or **START + SELECT** | `Q`, `Esc`, or close window |
+| **Save & Exit to Knulli** | **MENU (`M`)** | `Q`, `Esc`, or close window |
 
 ---
 

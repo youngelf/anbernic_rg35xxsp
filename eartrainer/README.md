@@ -6,10 +6,10 @@ A guitar-focused **Interval (`m2`–`P8`) and Chord Quality (`Major`, `Minor`, `
 
 ## Screenshots
 
-### 1. Interval Guessing Mode (`INTERVALS` — 3 Tries, Fretboard Root & Live Waveform)
+### 1. Interval Guessing Mode (`INTERVALS` — 3 Tries & Fretboard Root)
 ![Interval Guessing](promo/eartrainer_intervals.png)
 
-### 2. Interval Revealed (`P5` — Fretboard Shape, Degree Badge, Song Mnemonic & Oscilloscope)
+### 2. Interval Revealed (`P5` — Fretboard Shape, Degree Badge & Song Mnemonic)
 ![Interval Revealed](promo/eartrainer_revealed.png)
 
 ### 3. Chord Quality Mode (`CHORDS` — Moveable 4-String `C Maj7` Voicing & Chorus Electric Timbre)
@@ -28,11 +28,11 @@ A guitar-focused **Interval (`m2`–`P8`) and Chord Quality (`Major`, `Minor`, `
 2. **Asynchronous Background Audio Synthesis Thread**:
    - Note scheduling (`ASC`, `DESC`, `HARM`, `MIX`, `ARP+STRUM`, `STRUM`, `ARPEGGIO`), string excitation, and biquad body filtering run inside a **dedicated background audio thread** driven via a lock-free atomic command ring buffer (`post_audio_batch()`), keeping the `640×480` UI completely non-blocking at 60 FPS.
 3. **Native `640×480` High-Resolution Display**:
-   - **12-Fret 6-String Rosewood Fretboard (`E A D G B e`)**: Displays realistic bronze/steel string gauges, real-time vibrating string animation when notes ring, anti-aliased fret markers (`R` in gold, target interval or 4-string chord shape in emerald green or audition blue with interval degree badges `R`, `3`, `5`, `7`), and fret numbers `1`–`12`.
-   - **Inspector & Live Waveform Oscilloscope Card**: Shows the root note string/fret, remaining guess pips, full interval/chord spelling, classic song mnemonic, and a real-time audio oscilloscope.
-   - **Rich 4×3 Answer Keypad Grid**: Each of the 12 cards displays the interval/chord title, semitone count or chord formula, song mnemonic or full chord name (toggleable via `R2`), and your lifetime accuracy percentage for that item.
+   - **12-Fret 6-String Rosewood Fretboard (`E A D G B e`)**: Displays realistic bronze/steel string gauges, anti-aliased fret markers (`R` in gold, target interval or 4-string chord shape in emerald green or audition blue with interval degree badges `R`, `3`, `5`, `7`), and fret numbers `1`–`12`.
+   - **Inspector Card**: Shows the root note string/fret, remaining guess pips, full interval/chord spelling, and classic song mnemonic.
+   - **High-Visibility 4×3 Answer Keypad Grid**: Each of the 12 cards displays the interval/chord label in large `28px` typography (`m2`, `M2`, `m3`, `M3`, etc.) along with your lifetime accuracy percentage for that item.
 4. **Hardware-Accurate RG 35xxSP & Desktop Keyboard Controls**:
-   - Maps all RG 35xxSP `evdev` buttons (`304`=A, `305`=B, `306`=X, `307`=Y, `308`=L1, `309`=R1, `310`/`314`=SELECT, `311`/`315`=START, `312`=L2, `313`=R2) and desktop keyboard keys (`A`, `B`, `X`, `Y`, `L`, `R`, `1`, `2`, `Tab`, `Enter`, cursor arrows).
+   - Maps all RG 35xxSP `evdev` buttons (`304`=A, `305`=B, `306`=Y, `307`=X, `308`=L1, `309`=R1, `310`=SELECT, `311`=START, `312`=L2, `313`=R2, `316`=MENU) and desktop keyboard keys (`A`, `B`, `X`, `Y`, `L`, `R`, `1`, `2`, `Tab`, `Enter`, cursor arrows).
 
 ---
 
