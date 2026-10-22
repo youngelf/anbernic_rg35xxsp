@@ -63,8 +63,8 @@
  * -----------------------------------------------------------------------------------------
  * Physical   FDT Label  GPIO      Code (Dec/Hex)   Linux Header Macro  Standard RG35xxSP Role
  * ---------  ---------  --------  ---------------  ------------------  ----------------------------------
- * B (South)  keyA       PA0  (L)  304  (0x130)     BTN_SOUTH / BTN_A   Secondary Action / Back (B)
- * A (East)   keyB       PA1  (L)  305  (0x131)     BTN_EAST  / BTN_B   Start/Stop Playback / Primary (A)
+ * A (East)   keyA       PA0  (L)  304  (0x130)     BTN_SOUTH / BTN_A   Start/Stop Playback / Primary (A)
+ * B (South)  keyB       PA1  (L)  305  (0x131)     BTN_EAST  / BTN_B   Secondary Action / Back (B)
  * Y (West)   keyX       PA2  (L)  306  (0x132)     BTN_C               Help Overlay (Y)
  * X (North)  keyY       PA3  (L)  307  (0x133)     BTN_NORTH / BTN_X   Auxiliary Action (X)
  * L1         keyL1      PA10 (L)  308  (0x134)     BTN_WEST  / BTN_Y   Primary Switcher (Prev / Dec)
@@ -83,11 +83,9 @@
  * LID OPEN   hall-sw    GPIO      111  (0x06f)     KEY_DELETE          Clamshell Opened
  *
  * (*) Note on Physical A/B and X/Y vs Kernel Evdev Codes (304..307):
- *     The physical buttons printed on the Anbernic RG 35xxSP shell follow the Nintendo/SNES
- *     layout (A=East, B=South, X=North, Y=West), whereas the H700 `gpio_keys` driver emits
- *     Xbox/positional evdev codes:
- *       - Physical B (South) -> 304 (0x130)
- *       - Physical A (East)  -> 305 (0x131)
+ *     On the Anbernic RG 35xxSP (`Anbernic RG35XX-SP Controller`):
+ *       - Physical A (East)  -> 304 (0x130)
+ *       - Physical B (South) -> 305 (0x131)
  *       - Physical Y (West)  -> 306 (0x132)
  *       - Physical X (North) -> 307 (0x133)
  *
@@ -208,12 +206,13 @@
 
 /*
  * Raw Linux evdev keycodes on the Anbernic RG 35xxSP (`Anbernic RG35XX-SP Controller`).
- * Note: The physical shell uses Nintendo/SNES face button labels (A=East, B=South, X=North, Y=West),
- * while the H700 kernel GPIO driver emits 304 for South (B), 305 for East (A), 306 for West (Y),
- * and 307 for North (X).
+ *   - 304 (0x130) -> Physical A (East / Right)
+ *   - 305 (0x131) -> Physical B (South / Bottom)
+ *   - 306 (0x132) -> Physical Y (West / Left)
+ *   - 307 (0x133) -> Physical X (North / Top)
  */
-#define RG35XXSP_EVKEY_B          304  /* 0x130 (BTN_SOUTH)  - Physical B (South / Bottom) */
-#define RG35XXSP_EVKEY_A          305  /* 0x131 (BTN_EAST)   - Physical A (East / Right)   */
+#define RG35XXSP_EVKEY_A          304  /* 0x130 (BTN_SOUTH)  - Physical A (East / Right)   */
+#define RG35XXSP_EVKEY_B          305  /* 0x131 (BTN_EAST)   - Physical B (South / Bottom) */
 #define RG35XXSP_EVKEY_Y          306  /* 0x132 (BTN_C)      - Physical Y (West / Left)    */
 #define RG35XXSP_EVKEY_X          307  /* 0x133 (BTN_NORTH)  - Physical X (North / Top)    */
 #define RG35XXSP_EVKEY_L1         308  /* 0x134 (BTN_WEST)   - Physical L1 */
