@@ -26,24 +26,27 @@ else
     SYSROOT_FLAGS  =
 endif
 
-CFLAGS  = -O2 -Wall -Wextra -std=gnu11 -mcpu=cortex-a53 -DTARGET_RG35XXSP $(SYSROOT_FLAGS)
-LDFLAGS = -lm -ldl
+CFLAGS  = -O2 -Wall -Wextra -std=gnu11 -D_GNU_SOURCE=1 -mcpu=cortex-a53 -DTARGET_RG35XXSP $(SYSROOT_FLAGS)
+LDFLAGS = -lm -lpthread -ldl
 
 # --- Host Linux (x86_64 X11 640x480 window) Configuration ---
 HOST_CC      ?= gcc
 HOST_SCALE   ?= 2
-HOST_CFLAGS  = -O2 -g -Wall -Wextra -std=gnu11 -DHOST_X11 -DHOST_SCALE=$(HOST_SCALE)
-HOST_LDFLAGS = -lX11 -lm
+HOST_CFLAGS  = -O2 -g -Wall -Wextra -std=gnu11 -D_GNU_SOURCE=1 -DHOST_X11 -DHOST_SCALE=$(HOST_SCALE)
+HOST_LDFLAGS = -lX11 -lm -lpthread -ldl
 
 # --- Targets ---
 TARGET      = pomodoro
 HOST_TARGET = pomodoro_linux
 SRCS        = pomodoro.c
+DEPS        = $(SRCS) ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 
-.PHONY: all 35xxsp rg35xxsp linux linux-x64 x64 host run-linux package clean
+.PHONY: all arm 35xxsp rg35xxsp linux linux-x64 x64 host run-linux package clean
 
 # Default builds the Anbernic RG35XX SP (aarch64) binary, Linux x86_64 binary, and SD card package
 all: $(TARGET) $(HOST_TARGET) package
+
+arm: $(TARGET)
 
 35xxsp: $(TARGET)
 
@@ -58,11 +61,11 @@ x64: $(HOST_TARGET)
 
 host: $(HOST_TARGET)
 
-$(TARGET): $(SRCS)
+$(TARGET): $(DEPS)
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
 	$(STRIP) $(TARGET)
 
-$(HOST_TARGET): $(SRCS)
+$(HOST_TARGET): $(DEPS)
 	$(HOST_CC) $(HOST_CFLAGS) -o $(HOST_TARGET) $(SRCS) $(HOST_LDFLAGS)
 
 run-linux: $(HOST_TARGET)

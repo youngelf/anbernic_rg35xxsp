@@ -61,6 +61,9 @@
 
 #include "../rg35xxsp_input.h"
 
+#define RG35XXSP_SF2_IMPLEMENTATION
+#include "../rg35xxsp_sf2.h"
+
 typedef struct {
     uint32_t held;
     uint32_t pressed;
@@ -319,7 +322,12 @@ static void build_guitar_voicing(int root_pc, ChordQuality qual, int voicing_idx
 }
 
 /* ============================================================================
- * 3. STUDIO-GRADE BACKGROUND FLOATING-POINT EKS GUITAR SYNTHESIZER
+ * 3. STUDIO-GRADE BACKGROUND SOUNDFONT (SF2) + EKS GUITAR SYNTHESIZER
+ *    - Primary: TinySoundFont (GeneralUser-GS.sf2 / pocketband.sf2) on 6
+ *      constant-power stereo-panned channels + stereo chorus + Freeverb reverb
+ *    - Fallback: Extended Karplus-Strong with 1st-order all-pass dispersion,
+ *      zero-mean excitation, 6 ms anti-click crossfade, 350 ms raised-cosine
+ *      release, 2-band body resonator, 20 Hz DC blocker, & stereo room reverb
  * ============================================================================ */
 
 typedef enum {
@@ -334,22 +342,39 @@ static const char *k_timbre_names[3] = {
     "NYLON ARP"
 };
 
-#define EKS_MAX_DELAY 1024
+#define EKS_MAX_DELAY          1024
+#define EKS_RING_SAMPLES       (SAMPLE_RATE * 3)
+#define EKS_RELEASE_SAMPLES    ((SAMPLE_RATE * 350) / 1000)
 
 typedef struct {
     float buf[EKS_MAX_DELAY];
     int   buf_len;
-    float write_idx;
-    float exact_period;
+    int   pos;
+    float frac_delay;
     float damping;
-    float stretch;      /* Lowpass brightness coefficient */
-    float lp_state;
-    float ap_state;
-    float prev_in;
+    float brightness;
+    float disp_coeff;
+    float disp_prev_in;
+    float disp_prev_out;
+    float pan_l;
+    float pan_r;
+    float last_out;
+    float declick_sample;
     int   start_delay_samples;
     int   samples_left;
     bool  active;
 } EksString;
+
+/* Per-string SF2 strum scheduler (zero malloc on audio thread) */
+typedef struct {
+    bool  pending;
+    int   delay_samples;
+    int   midi_note;
+    float vel;
+    bool  sounding;
+    int   active_midi;
+    int   gate_samples;
+} Sf2StringSlot;
 
 /* Lock-free strum request posted from UI thread -> Background Audio thread */
 typedef struct {
@@ -362,13 +387,79 @@ static uint32_t          g_cmd_read_seq  = 0;
 static StrumCommand      g_pending_cmd;
 
 /* Audio thread internal state */
+static Rg35Sf2Engine  g_sf2;
+static bool           g_sf2_init_attempted = false;
+static int            g_sf2_active_timbre  = -1;
+static Sf2StringSlot  g_sf2_slots[6];
+static GuitarTimbre   g_audio_timbre = TIMBRE_ACOUSTIC;
+
 static EksString g_eks[6];
-static float     g_body_z1_a = 0.0f, g_body_z2_a = 0.0f;
-static float     g_body_z1_b = 0.0f, g_body_z2_b = 0.0f;
-static float     g_chorus_buf[2048];
+static bool      g_eks_pan_ready = false;
+static float     g_body_air_b0, g_body_air_a1, g_body_air_a2;
+static float     g_body_wood_b0, g_body_wood_a1, g_body_wood_a2;
+static float     g_body_air_y1 = 0.0f, g_body_air_y2 = 0.0f;
+static float     g_body_wood_y1 = 0.0f, g_body_wood_y2 = 0.0f;
+static float     g_chorus_buf_l[2048];
+static float     g_chorus_buf_r[2048];
 static int       g_chorus_pos = 0;
 static float     g_chorus_phase = 0.0f;
 static uint32_t  g_audio_rng = 0x9E3779B9u;
+
+static void compute_resonator_coeffs(double freq_hz, double q,
+                                     float *b0, float *a1, float *a2) {
+    double w0 = (2.0 * M_PI * freq_hz) / (double)SAMPLE_RATE;
+    double alpha = sin(w0) / (2.0 * q);
+    double a0 = 1.0 + alpha;
+    *b0 = (float)(alpha / a0);
+    *a1 = (float)((-2.0 * cos(w0)) / a0);
+    *a2 = (float)((1.0 - alpha) / a0);
+}
+
+static void init_eks_tables_if_needed(void) {
+    if (g_eks_pan_ready) return;
+    for (int s = 0; s < 6; s++) {
+        double norm = ((double)s / 5.0) * 2.0 - 1.0; /* -1 (low E) to +1 (high e) */
+        double angle = (M_PI * 0.25) + norm * 0.34;
+        g_eks[s].pan_l = (float)cos(angle);
+        g_eks[s].pan_r = (float)sin(angle);
+    }
+    compute_resonator_coeffs(105.0, 4.5, &g_body_air_b0, &g_body_air_a1, &g_body_air_a2);
+    compute_resonator_coeffs(235.0, 5.5, &g_body_wood_b0, &g_body_wood_a1, &g_body_wood_a2);
+    g_eks_pan_ready = true;
+}
+
+static void sf2_configure_guitar_timbre(GuitarTimbre timbre) {
+    if (!rg35_sf2_ready(&g_sf2)) return;
+    int pref1 = 25, pref2 = 24;
+    if (timbre == TIMBRE_ACOUSTIC) {
+        pref1 = 25; pref2 = 24; /* Steel Acoustic Guitar */
+    } else if (timbre == TIMBRE_CHORUS) {
+        pref1 = 27; pref2 = 26; /* Clean / Jazz Electric Guitar */
+    } else {
+        pref1 = 24; pref2 = 25; /* Nylon Classical Guitar */
+    }
+    int idx = tsf_get_presetindex(g_sf2.synth, 0, pref1);
+    if (idx < 0) idx = tsf_get_presetindex(g_sf2.synth, 0, pref2);
+    if (idx < 0) idx = 0;
+
+    /* Constant-power stereo string spread: 6th string E2 left -> 1st string E4 right */
+    static const float k_sf2_pan[6] = { 0.26f, 0.35f, 0.45f, 0.55f, 0.65f, 0.74f };
+    for (int s = 0; s < 6; s++) {
+        tsf_channel_set_presetindex(g_sf2.synth, s, idx);
+        rg35_sf2_set_channel_pan_vol(&g_sf2, s, k_sf2_pan[s], 0.90f);
+    }
+    g_sf2_active_timbre = (int)timbre;
+}
+
+static void init_sf2_in_audio_thread(void) {
+    if (g_sf2_init_attempted) return;
+    g_sf2_init_attempted = true;
+    init_eks_tables_if_needed();
+    if (rg35_sf2_init(&g_sf2, SAMPLE_RATE, 48, 0.22f, 1.30f)) {
+        g_sf2_active_timbre = -1;
+        sf2_configure_guitar_timbre(g_audio_timbre);
+    }
+}
 
 static void post_strum_command(const GuitarVoicing *v, GuitarTimbre timbre) {
     StrumCommand cmd;
@@ -379,76 +470,129 @@ static void post_strum_command(const GuitarVoicing *v, GuitarTimbre timbre) {
     g_cmd_write_seq++;
 }
 
-static void init_eks_strum_in_audio_thread(const StrumCommand *cmd) {
-    int active_order = 0;
-    /* Stagger: 20 ms for Acoustic/Chorus downstroke, 58 ms for Nylon fingerpicked arpeggio */
-    int stagger_ms = (cmd->timbre == TIMBRE_NYLON) ? 58 : 20;
+static void init_strum_in_audio_thread(const StrumCommand *cmd) {
+    init_eks_tables_if_needed();
+    g_audio_timbre = cmd->timbre;
+    int stagger_ms = (cmd->timbre == TIMBRE_NYLON) ? 58 :
+                     (cmd->timbre == TIMBRE_CHORUS) ? 18 : 22;
 
+    if (rg35_sf2_ready(&g_sf2)) {
+        if (g_sf2_active_timbre != (int)cmd->timbre) {
+            sf2_configure_guitar_timbre(cmd->timbre);
+        }
+        int active_order = 0;
+        for (int s = 0; s < 6; s++) {
+            Sf2StringSlot *sl = &g_sf2_slots[s];
+            if (sl->sounding) {
+                rg35_sf2_note_off(&g_sf2, s, sl->active_midi);
+                sl->sounding = false;
+            }
+            sl->pending = false;
+            if (cmd->frets[s] < 0) continue;
+
+            sl->midi_note     = k_string_midi[s] + cmd->frets[s];
+            sl->delay_samples = active_order * ((SAMPLE_RATE * stagger_ms) / 1000);
+            sl->vel           = 0.86f - (float)s * 0.025f;
+            sl->gate_samples  = (int)(SAMPLE_RATE * 2.8f);
+            sl->pending       = true;
+            active_order++;
+        }
+        return;
+    }
+
+    /* Upgraded Extended Karplus-Strong fallback with 1st-order all-pass dispersion,
+     * zero-mean excitation, and 6 ms declick crossfade */
+    int active_order = 0;
     for (int s = 0; s < 6; s++) {
         EksString *st = &g_eks[s];
         if (cmd->frets[s] < 0) {
+            if (st->active) st->declick_sample += st->last_out;
             st->active = false;
             st->samples_left = 0;
+            st->last_out = 0.0f;
             continue;
+        }
+        if (st->active) {
+            st->declick_sample += st->last_out;
+            st->last_out = 0.0f;
         }
 
         int midi_note = k_string_midi[s] + cmd->frets[s];
-        float freq = 440.0f * powf(2.0f, (float)(midi_note - 69) / 12.0f);
-        float exact_period = (float)SAMPLE_RATE / freq;
-        if (exact_period < 16.0f) exact_period = 16.0f;
-        if (exact_period > (float)(EKS_MAX_DELAY - 4)) exact_period = (float)(EKS_MAX_DELAY - 4);
+        double freq = 440.0 * pow(2.0, (double)(midi_note - 69) / 12.0);
+        double exact_period = (double)SAMPLE_RATE / freq;
 
-        int int_period = (int)floorf(exact_period);
-        st->buf_len      = int_period;
-        st->exact_period = exact_period;
-        st->write_idx    = 0.0f;
-        st->lp_state     = 0.0f;
-        st->ap_state     = 0.0f;
-        st->prev_in      = 0.0f;
+        float brightness = (cmd->timbre == TIMBRE_NYLON) ? (0.56f - (float)s * 0.025f) :
+                           (cmd->timbre == TIMBRE_CHORUS) ? (0.32f - (float)s * 0.020f) :
+                                                            (0.43f - (float)s * 0.034f);
+        if (brightness < 0.22f) brightness = 0.22f;
+        st->brightness = brightness;
 
-        if (cmd->timbre == TIMBRE_ACOUSTIC) {
-            st->damping = 0.9962f - (float)s * 0.0003f;
-            st->stretch = 0.36f; /* Bright bronze acoustic strings */
-        } else if (cmd->timbre == TIMBRE_CHORUS) {
-            st->damping = 0.9972f - (float)s * 0.0002f;
-            st->stretch = 0.28f; /* Sustained electric strings */
-        } else {
-            st->damping = 0.9950f - (float)s * 0.0004f;
-            st->stretch = 0.56f; /* Warm mellow nylon strings */
-        }
+        /* 1st-order all-pass inharmonicity dispersion filter */
+        float disp_a = (cmd->timbre == TIMBRE_NYLON) ? (-0.12f + (float)s * 0.01f)
+                                                     : (-0.25f + (float)s * 0.02f);
+        st->disp_coeff    = disp_a;
+        st->disp_prev_in  = 0.0f;
+        st->disp_prev_out = 0.0f;
+        double disp_delay = (1.0 + (double)disp_a) / (1.0 - (double)disp_a);
 
+        double comp_delay = exact_period - (double)brightness - disp_delay;
+        int period = (int)floor(comp_delay);
+        if (period < 20) period = 20;
+        if (period >= EKS_MAX_DELAY - 3) period = EKS_MAX_DELAY - 3;
+        st->buf_len    = period;
+        st->frac_delay = (float)(comp_delay - (double)period);
+        if (st->frac_delay < 0.0f) st->frac_delay = 0.0f;
+        if (st->frac_delay > 0.999f) st->frac_delay = 0.999f;
+
+        double target_t60 = (cmd->timbre == TIMBRE_CHORUS ? 3.8 : 3.2) - (double)s * 0.18 - (double)cmd->frets[s] * 0.025;
+        if (target_t60 < 1.6) target_t60 = 1.6;
+        st->damping = (float)pow(0.001, exact_period / (target_t60 * (double)SAMPLE_RATE));
+        if (st->damping > 0.9992f) st->damping = 0.9992f;
+
+        st->pos                 = 0;
         st->start_delay_samples = active_order * ((SAMPLE_RATE * stagger_ms) / 1000);
-        st->samples_left        = (int)(SAMPLE_RATE * 2.8f);
+        st->samples_left        = EKS_RING_SAMPLES;
         active_order++;
 
-        /* Synthesize initial plucked-string excitation with pick-position comb filter */
-        float raw[EKS_MAX_DELAY];
-        int pick_comb = int_period / 7;
-        if (pick_comb < 2) pick_comb = 2;
-
-        for (int i = 0; i < int_period; i++) {
+        double inv_period = (2.0 * M_PI) / (double)period;
+        float noise_lvl = (cmd->timbre == TIMBRE_NYLON) ? 0.18f : (0.26f + 0.025f * (float)s);
+        for (int i = 0; i < period; i++) {
             g_audio_rng = g_audio_rng * 1664525u + 1013904223u;
-            float noise = ((float)(int32_t)(g_audio_rng >> 16) - 32768.0f) / 32768.0f;
-            float phase = (2.0f * (float)M_PI * (float)i) / (float)int_period;
-            /* Fundamental + 2nd + 3rd harmonic body warmth */
-            float body = 0.50f * sinf(phase) + 0.28f * sinf(2.0f * phase) + 0.14f * sinf(3.0f * phase);
-            float n_gain = (cmd->timbre == TIMBRE_NYLON) ? 0.25f : 0.48f;
-            raw[i] = body + n_gain * noise;
+            float white = (float)((int32_t)(g_audio_rng >> 8) - 8388608) * (1.0f / 8388608.0f);
+            double ph = (double)i * inv_period;
+            double harm = 0.50 * sin(ph) + 0.27 * sin(2.0 * ph + 0.35) +
+                          0.14 * sin(3.0 * ph + 0.90) + 0.07 * sin(4.0 * ph + 1.45);
+            st->buf[i] = white * noise_lvl + (float)harm * 0.62f;
         }
 
-        /* Apply pick-position comb filter & warm multi-pass pre-smoothing */
-        for (int i = 0; i < int_period; i++) {
-            int prev_pick = (i - pick_comb + int_period) % int_period;
-            st->buf[i] = raw[i] - 0.45f * raw[prev_pick];
+        /* Pluck-position comb filter (~15% from bridge) */
+        int pick_off = (int)(period * (0.14 + 0.012 * (double)s));
+        if (pick_off < 2) pick_off = 2;
+        float prev_pick = st->buf[period - 1];
+        for (int i = period - 1; i >= 0; i--) {
+            int di = (i - pick_off + period) % period;
+            st->buf[i] = 0.65f * st->buf[i] - 0.35f * st->buf[di];
         }
-        int smooth_passes = (cmd->timbre == TIMBRE_NYLON) ? 3 : 2;
+        st->buf[0] = 0.5f * (st->buf[0] + prev_pick);
+
+        /* Warm circular smoothing */
+        int smooth_passes = (cmd->timbre == TIMBRE_NYLON) ? 3 : ((s <= 2) ? 2 : 1);
         for (int p = 0; p < smooth_passes; p++) {
-            float prev = st->buf[int_period - 1];
-            for (int i = 0; i < int_period; i++) {
+            float prev = st->buf[period - 1];
+            for (int i = 0; i < period; i++) {
                 float cur = st->buf[i];
-                st->buf[i] = 0.55f * cur + 0.45f * prev;
+                st->buf[i] = 0.62f * cur + 0.38f * prev;
                 prev = cur;
             }
+        }
+
+        /* Explicit zero-mean DC-offset removal */
+        double sum = 0.0;
+        for (int i = 0; i < period; i++) sum += st->buf[i];
+        float mean = (float)(sum / (double)period);
+        float s_gain = 0.92f - 0.03f * (float)s;
+        for (int i = 0; i < period; i++) {
+            st->buf[i] = (st->buf[i] - mean) * s_gain;
         }
         st->active = true;
     }
@@ -458,6 +602,9 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
     (void)userdata;
     int16_t *out = (int16_t *)stream;
     int frames = len / (2 * AUDIO_CHANNELS);
+    if (frames <= 0) return;
+
+    init_sf2_in_audio_thread();
 
     /* Check if the UI thread queued a new strum command */
     uint32_t w_seq = g_cmd_write_seq;
@@ -465,22 +612,101 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
         __sync_synchronize();
         StrumCommand cmd = g_pending_cmd;
         g_cmd_read_seq = w_seq;
-        init_eks_strum_in_audio_thread(&cmd);
+        init_strum_in_audio_thread(&cmd);
     }
 
-    GuitarTimbre cur_timbre = g_pending_cmd.timbre;
+    GuitarTimbre cur_timbre = g_audio_timbre;
 
-    /* Stereo pan positions for strings 0..5 (E2..E4) */
-    static const float k_pan_l[6] = { 0.82f, 0.72f, 0.60f, 0.48f, 0.36f, 0.26f };
-    static const float k_pan_r[6] = { 0.26f, 0.36f, 0.48f, 0.60f, 0.72f, 0.82f };
+    if (rg35_sf2_ready(&g_sf2)) {
+        /* Sub-block sample-accurate SF2 rendering + optional stereo chorus + room reverb */
+        float raw_stereo[1024 * 2];
+        int pos = 0;
+        while (pos < frames) {
+            int rem = frames - pos;
+            if (rem > 1024) rem = 1024;
 
+            /* Find earliest pending strum or gate expiration */
+            int next_ev = rem;
+            for (int s = 0; s < 6; s++) {
+                if (g_sf2_slots[s].pending && g_sf2_slots[s].delay_samples < next_ev) {
+                    next_ev = g_sf2_slots[s].delay_samples;
+                }
+                if (g_sf2_slots[s].sounding && g_sf2_slots[s].gate_samples < next_ev) {
+                    next_ev = g_sf2_slots[s].gate_samples;
+                }
+            }
+            if (next_ev <= 0) {
+                for (int s = 0; s < 6; s++) {
+                    if (g_sf2_slots[s].pending && g_sf2_slots[s].delay_samples <= 0) {
+                        g_sf2_slots[s].pending = false;
+                        g_sf2_slots[s].sounding = true;
+                        g_sf2_slots[s].active_midi = g_sf2_slots[s].midi_note;
+                        rg35_sf2_note_on(&g_sf2, s, g_sf2_slots[s].midi_note, g_sf2_slots[s].vel);
+                    }
+                    if (g_sf2_slots[s].sounding && g_sf2_slots[s].gate_samples <= 0) {
+                        g_sf2_slots[s].sounding = false;
+                        rg35_sf2_note_off(&g_sf2, s, g_sf2_slots[s].active_midi);
+                    }
+                }
+                next_ev = 1;
+            }
+            int chunk = (next_ev < rem) ? next_ev : rem;
+            for (int s = 0; s < 6; s++) {
+                if (g_sf2_slots[s].pending)  g_sf2_slots[s].delay_samples -= chunk;
+                if (g_sf2_slots[s].sounding) g_sf2_slots[s].gate_samples  -= chunk;
+            }
+
+            tsf_render_float(g_sf2.synth, raw_stereo, chunk, 0);
+            for (int i = 0; i < chunk; i++) {
+                float in_l = raw_stereo[i * 2];
+                float in_r = raw_stereo[i * 2 + 1];
+
+                /* Lush stereo chorus LFO modulation for CHORUS EL timbre */
+                if (cur_timbre == TIMBRE_CHORUS) {
+                    g_chorus_buf_l[g_chorus_pos] = in_l;
+                    g_chorus_buf_r[g_chorus_pos] = in_r;
+                    g_chorus_phase += (2.0f * (float)M_PI * 0.78f) / (float)SAMPLE_RATE;
+                    if (g_chorus_phase > 2.0f * (float)M_PI) g_chorus_phase -= 2.0f * (float)M_PI;
+                    int d_l = (int)(320.0f + 95.0f * sinf(g_chorus_phase));
+                    int d_r = (int)(350.0f + 95.0f * cosf(g_chorus_phase));
+                    in_l = in_l * 0.76f + 0.34f * g_chorus_buf_l[(g_chorus_pos - d_l + 2048) & 2047];
+                    in_r = in_r * 0.76f + 0.34f * g_chorus_buf_r[(g_chorus_pos - d_r + 2048) & 2047];
+                    g_chorus_pos = (g_chorus_pos + 1) & 2047;
+                }
+
+                float ol, or_;
+                rg35_sf2_fx_sample(&g_sf2, in_l, in_r, &ol, &or_);
+                int32_t sl = (int32_t)(ol * 31500.0f);
+                int32_t sr = (int32_t)(or_ * 31500.0f);
+                if (sl >  32767) sl =  32767; else if (sl < -32767) sl = -32767;
+                if (sr >  32767) sr =  32767; else if (sr < -32767) sr = -32767;
+                out[(pos + i) * 2 + 0] = (int16_t)sl;
+                out[(pos + i) * 2 + 1] = (int16_t)sr;
+            }
+            pos += chunk;
+        }
+        return;
+    }
+
+    /* Fallback: Upgraded EKS Physical Model + Stereo Room Reverb + DC Blocker */
     for (int f = 0; f < frames; f++) {
-        float mix_l = 0.0f;
-        float mix_r = 0.0f;
+        float dry_l = 0.0f;
+        float dry_r = 0.0f;
         float mono_sum = 0.0f;
 
         for (int s = 0; s < 6; s++) {
             EksString *st = &g_eks[s];
+
+            /* Drain 6 ms anti-click crossfade residual */
+            if (st->declick_sample != 0.0f) {
+                float dc = st->declick_sample;
+                dry_l += dc * st->pan_l;
+                dry_r += dc * st->pan_r;
+                mono_sum += dc;
+                st->declick_sample = dc * 0.985f;
+                if (fabsf(st->declick_sample) < 1e-6f) st->declick_sample = 0.0f;
+            }
+
             if (!st->active || st->samples_left <= 0) continue;
 
             if (st->start_delay_samples > 0) {
@@ -488,71 +714,84 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
                 continue;
             }
 
-            int idx0 = (int)st->write_idx;
-            int idx1 = (idx0 + 1 < st->buf_len) ? (idx0 + 1) : 0;
-            float cur = st->buf[idx0];
-            float nxt = st->buf[idx1];
+            int len = st->buf_len;
+            int p0  = st->pos;
+            int p1  = (p0 + 1 < len) ? (p0 + 1) : 0;
+            int p2  = (p1 + 1 < len) ? (p1 + 1) : 0;
 
-            /* Tunable 1-pole loop low-pass filter */
-            float filtered = (1.0f - st->stretch) * cur + st->stretch * nxt;
+            float s0 = st->buf[p0];
+            float s1 = st->buf[p1];
+            float s2 = st->buf[p2];
 
-            /* Fractional delay all-pass interpolation for exact fret tuning */
-            float frac = st->exact_period - (float)st->buf_len;
-            float c_ap = (1.0f - frac) / (1.0f + frac + 0.001f);
-            float ap_out = c_ap * filtered + st->prev_in - c_ap * st->ap_state;
-            st->prev_in  = filtered;
-            st->ap_state = ap_out;
+            float frac = st->frac_delay;
+            float cur_i = s0 + frac * (s1 - s0);
+            float nxt_i = s1 + frac * (s2 - s1);
+            float lp_out = ((1.0f - st->brightness) * cur_i + st->brightness * nxt_i) * st->damping;
 
-            float damped = ap_out * st->damping;
-            st->buf[idx0] = damped;
-            st->write_idx = (float)idx1;
+            /* 1st-order all-pass inharmonicity dispersion filter */
+            float a = st->disp_coeff;
+            float disp_out = a * lp_out + st->disp_prev_in - a * st->disp_prev_out;
+            if (fabsf(disp_out) < 1e-9f) disp_out = 0.0f;
+            st->disp_prev_in  = lp_out;
+            st->disp_prev_out = disp_out;
 
-            st->samples_left--;
-            if (st->samples_left == 0) {
-                st->active = false;
+            st->buf[p0] = disp_out;
+            st->pos = p1;
+
+            /* 350 ms raised-cosine tail release */
+            float env = 1.0f;
+            int left = st->samples_left;
+            if (left < EKS_RELEASE_SAMPLES) {
+                double prog = (double)left / (double)EKS_RELEASE_SAMPLES;
+                env = (float)(0.5 * (1.0 - cos(M_PI * prog)));
             }
 
-            mix_l    += cur * k_pan_l[s];
-            mix_r    += cur * k_pan_r[s];
-            mono_sum += cur;
+            float sample = s0 * env;
+            st->last_out = sample;
+            dry_l += sample * st->pan_l;
+            dry_r += sample * st->pan_r;
+            mono_sum += sample;
+
+            st->samples_left = left - 1;
+            if (st->samples_left <= 0) {
+                st->active = false;
+                st->last_out = 0.0f;
+            }
         }
 
-        /* Acoustic Guitar Body Resonator (105 Hz Helmholtz + 215 Hz Soundboard) */
-        float body_a = 0.035f * mono_sum + 1.968f * g_body_z1_a - 0.972f * g_body_z2_a;
-        g_body_z2_a  = g_body_z1_a;
-        g_body_z1_a  = body_a;
+        /* 2-band acoustic guitar wooden soundboard resonator (105 Hz + 235 Hz) */
+        float air_out = g_body_air_b0 * mono_sum - g_body_air_a1 * g_body_air_y1 - g_body_air_a2 * g_body_air_y2;
+        g_body_air_y2 = g_body_air_y1;
+        g_body_air_y1 = (fabsf(air_out) < 1e-9f) ? 0.0f : air_out;
 
-        float body_b = 0.025f * mono_sum + 1.942f * g_body_z1_b - 0.952f * g_body_z2_b;
-        g_body_z2_b  = g_body_z1_b;
-        g_body_z1_b  = body_b;
+        float wood_out = g_body_wood_b0 * mono_sum - g_body_wood_a1 * g_body_wood_y1 - g_body_wood_a2 * g_body_wood_y2;
+        g_body_wood_y2 = g_body_wood_y1;
+        g_body_wood_y1 = (fabsf(wood_out) < 1e-9f) ? 0.0f : wood_out;
 
-        float body_res = (body_a + body_b) * (cur_timbre == TIMBRE_CHORUS ? 0.12f : 0.25f);
-        mix_l += body_res;
-        mix_r += body_res;
+        float body_res = (air_out * 0.13f + wood_out * 0.15f) * (cur_timbre == TIMBRE_CHORUS ? 0.45f : 1.0f);
+        float mix_l = dry_l * 0.56f + body_res;
+        float mix_r = dry_r * 0.56f + body_res;
 
-        /* Stereo Chorus / Room Ambience Delay Line */
-        g_chorus_buf[g_chorus_pos] = 0.5f * (mix_l + mix_r);
-        g_chorus_phase += (2.0f * (float)M_PI * 0.85f) / (float)SAMPLE_RATE;
-        if (g_chorus_phase > 2.0f * (float)M_PI) g_chorus_phase -= 2.0f * (float)M_PI;
+        /* Stereo chorus LFO for CHORUS EL timbre */
+        if (cur_timbre == TIMBRE_CHORUS) {
+            g_chorus_buf_l[g_chorus_pos] = mix_l;
+            g_chorus_buf_r[g_chorus_pos] = mix_r;
+            g_chorus_phase += (2.0f * (float)M_PI * 0.85f) / (float)SAMPLE_RATE;
+            if (g_chorus_phase > 2.0f * (float)M_PI) g_chorus_phase -= 2.0f * (float)M_PI;
+            int d_l = (int)(340.0f + 100.0f * sinf(g_chorus_phase));
+            int d_r = (int)(380.0f + 100.0f * cosf(g_chorus_phase));
+            mix_l += 0.34f * g_chorus_buf_l[(g_chorus_pos - d_l + 2048) & 2047];
+            mix_r += 0.34f * g_chorus_buf_r[(g_chorus_pos - d_r + 2048) & 2047];
+            g_chorus_pos = (g_chorus_pos + 1) & 2047;
+        }
 
-        float mod_delay = (cur_timbre == TIMBRE_CHORUS)
-                          ? (340.0f + 110.0f * sinf(g_chorus_phase))
-                          : 520.0f;
-        int tap_l = (g_chorus_pos - (int)mod_delay + 2048) & 2047;
-        int tap_r = (g_chorus_pos - (int)(mod_delay * 1.18f) + 2048) & 2047;
-        float wet = (cur_timbre == TIMBRE_CHORUS) ? 0.34f : 0.16f;
-        mix_l += wet * g_chorus_buf[tap_l];
-        mix_r += wet * g_chorus_buf[tap_r];
-        g_chorus_pos = (g_chorus_pos + 1) & 2047;
-
-        /* Warm soft-clipping output stage */
-        float gain = 14500.0f;
-        int32_t sl = (int32_t)(tanhf(mix_l * 0.42f) * 2.2f * gain);
-        int32_t sr = (int32_t)(tanhf(mix_r * 0.42f) * 2.2f * gain);
-        if (sl >  32767) sl =  32767;
-        if (sl < -32767) sl = -32767;
-        if (sr >  32767) sr =  32767;
-        if (sr < -32767) sr = -32767;
+        /* Stereo Schroeder/Freeverb room reverb + 20 Hz DC blocker + soft limiter */
+        float ol, or_;
+        rg35_sf2_fx_sample(&g_sf2, mix_l, mix_r, &ol, &or_);
+        int32_t sl = (int32_t)(ol * 31000.0f);
+        int32_t sr = (int32_t)(or_ * 31000.0f);
+        if (sl >  32767) sl =  32767; else if (sl < -32767) sl = -32767;
+        if (sr >  32767) sr =  32767; else if (sr < -32767) sr = -32767;
 
         out[f * 2 + 0] = (int16_t)sl;
         out[f * 2 + 1] = (int16_t)sr;
@@ -744,6 +983,7 @@ static void platform_shutdown(void) {
         g_audio_running = false;
         pthread_join(g_audio_thread, NULL);
     }
+    rg35_sf2_free(&g_sf2);
     if (g_x11_img) {
         XDestroyImage(g_x11_img);
         g_x11_img = NULL;
@@ -1085,6 +1325,7 @@ static void platform_shutdown(void) {
         fn_SDL_CloseAudio();
         g_use_sdl2_audio = false;
     }
+    rg35_sf2_free(&g_sf2);
     if (g_use_sdl2_video) {
         if (g_sdl2_tex && fn_SDL_DestroyTexture)   fn_SDL_DestroyTexture(g_sdl2_tex);
         if (g_sdl2_ren && fn_SDL_DestroyRenderer)  fn_SDL_DestroyRenderer(g_sdl2_ren);
@@ -1525,7 +1766,71 @@ static void load_config(void) {
 #define R_INNER_MIN  63.0f
 #define R_HUB_MAX    60.0f
 
+#define WHEEL_LUT_X0 6
+#define WHEEL_LUT_Y0 56
+#define WHEEL_LUT_W  338
+#define WHEEL_LUT_H  338
+
+/* Precomputed 2x2 supersampled wheel LUT (eliminates ~450k trig calls/frame) */
+static uint8_t g_wheel_lut[WHEEL_LUT_H][WHEEL_LUT_W][4];
+static bool    g_wheel_lut_ready = false;
+
+static void init_wheel_lut(void) {
+    if (g_wheel_lut_ready) return;
+    for (int ly = 0; ly < WHEEL_LUT_H; ly++) {
+        int py = WHEEL_LUT_Y0 + ly;
+        for (int lx = 0; lx < WHEEL_LUT_W; lx++) {
+            int px = WHEEL_LUT_X0 + lx;
+            for (int sy = 0; sy < 2; sy++) {
+                for (int sx = 0; sx < 2; sx++) {
+                    float fx = (float)px + (sx ? 0.75f : 0.25f) - WHEEL_CX;
+                    float fy = (float)py + (sy ? 0.75f : 0.25f) - WHEEL_CY;
+                    float r  = sqrtf(fx * fx + fy * fy);
+                    uint8_t zone = 0; /* 0 = bg */
+                    uint8_t sec  = 0;
+                    if (r <= R_OUTER_MAX) {
+                        float deg = atan2f(fy, fx) * (180.0f / (float)M_PI) + 90.0f + 15.0f;
+                        while (deg < 0.0f)    deg += 360.0f;
+                        while (deg >= 360.0f) deg -= 360.0f;
+                        sec = (uint8_t)(((int)(deg / 30.0f)) % 12);
+                        float sec_pos = fmodf(deg, 30.0f);
+
+                        if (r >= R_OUTER_MIN && r <= R_OUTER_MAX) {
+                            bool on_radial = (sec_pos < 1.2f || sec_pos > 28.8f);
+                            bool on_ring   = (r < R_OUTER_MIN + 2.4f || r > R_OUTER_MAX - 2.4f);
+                            if (sec_pos < 0.6f || sec_pos > 29.4f) {
+                                zone = 4; /* outer radial sep (sel_bdr if sel, else sep_col) */
+                            } else if (on_radial || on_ring) {
+                                zone = 5; /* outer sel border (sel_bdr if sel, else outer_fill) */
+                            } else {
+                                zone = 3; /* outer fill */
+                            }
+                        } else if (r >= R_INNER_MIN && r <= R_INNER_MAX) {
+                            bool on_radial = (sec_pos < 1.6f || sec_pos > 28.4f);
+                            bool on_ring   = (r < R_INNER_MIN + 2.4f || r > R_INNER_MAX - 2.4f);
+                            if (sec_pos < 0.8f || sec_pos > 29.2f) {
+                                zone = 7; /* inner radial sep */
+                            } else if (on_radial || on_ring) {
+                                zone = 8; /* inner sel border */
+                            } else {
+                                zone = 6; /* inner fill */
+                            }
+                        } else if (r <= R_HUB_MAX) {
+                            zone = (r > R_HUB_MAX - 2.6f) ? 9 : 2; /* 9 = hub rim, 2 = hub fill */
+                        } else {
+                            zone = 1; /* ring separator */
+                        }
+                    }
+                    g_wheel_lut[ly][lx][sy * 2 + sx] = (uint8_t)((zone << 4) | (sec & 0x0Fu));
+                }
+            }
+        }
+    }
+    g_wheel_lut_ready = true;
+}
+
 static void render_circle_of_fifths_wheel(void) {
+    init_wheel_lut();
     uint32_t outer_fill[12], inner_fill[12];
     for (int s = 0; s < 12; s++) {
         int rel = (s - g_key_sector + 12) % 12;
@@ -1554,74 +1859,43 @@ static void render_circle_of_fifths_wheel(void) {
     }
 
     uint32_t hub_fill = (g_cur_ring == 2) ? RGB(190, 24, 93) : RGB(30, 41, 59);
+    uint32_t hub_rim  = (g_cur_ring == 2) ? RGB(254, 240, 138) : RGB(96, 165, 250);
     uint32_t bg_col   = RGB(13, 18, 28);
     uint32_t sep_col  = RGB(11, 15, 24);
     uint32_t sel_bdr  = RGB(254, 240, 138);
 
-    int x0 = (int)(WHEEL_CX - R_OUTER_MAX - 2);
-    int x1 = (int)(WHEEL_CX + R_OUTER_MAX + 2);
-    int y0 = (int)(WHEEL_CY - R_OUTER_MAX - 2);
-    int y1 = (int)(WHEEL_CY + R_OUTER_MAX + 2);
-
-    for (int py = y0; py <= y1; py++) {
+    for (int ly = 0; ly < WHEEL_LUT_H; ly++) {
+        int py = WHEEL_LUT_Y0 + ly;
         if (py < 0 || py >= NATIVE_H) continue;
-        for (int px = x0; px <= x1; px++) {
+        uint32_t *fb_row = &g_fb[py * NATIVE_W];
+        for (int lx = 0; lx < WHEEL_LUT_W; lx++) {
+            int px = WHEEL_LUT_X0 + lx;
             if (px < 0 || px >= 346) continue;
 
+            const uint8_t *cell = g_wheel_lut[ly][lx];
             uint32_t r_acc = 0, g_acc = 0, b_acc = 0;
-            for (int sy = 0; sy < 2; sy++) {
-                for (int sx = 0; sx < 2; sx++) {
-                    float fx = (float)px + (sx ? 0.75f : 0.25f) - WHEEL_CX;
-                    float fy = (float)py + (sy ? 0.75f : 0.25f) - WHEEL_CY;
-                    float r  = sqrtf(fx * fx + fy * fy);
-
-                    uint32_t sc = bg_col;
-                    if (r <= R_OUTER_MAX) {
-                        float deg = atan2f(fy, fx) * (180.0f / (float)M_PI) + 90.0f + 15.0f;
-                        while (deg < 0.0f)    deg += 360.0f;
-                        while (deg >= 360.0f) deg -= 360.0f;
-                        int sec = ((int)(deg / 30.0f)) % 12;
-                        float sec_pos = fmodf(deg, 30.0f);
-
-                        if (r >= R_OUTER_MIN && r <= R_OUTER_MAX) {
-                            bool sel = (g_cur_ring == 0 && g_cur_sector == sec);
-                            bool on_radial_edge = (sec_pos < 1.2f || sec_pos > 28.8f);
-                            bool on_ring_edge   = (r < R_OUTER_MIN + 2.4f || r > R_OUTER_MAX - 2.4f);
-                            if (sel && (on_radial_edge || on_ring_edge)) {
-                                sc = sel_bdr;
-                            } else if (sec_pos < 0.6f || sec_pos > 29.4f) {
-                                sc = sep_col;
-                            } else {
-                                sc = outer_fill[sec];
-                            }
-                        } else if (r >= R_INNER_MIN && r <= R_INNER_MAX) {
-                            bool sel = (g_cur_ring == 1 && g_cur_sector == sec);
-                            bool on_radial_edge = (sec_pos < 1.6f || sec_pos > 28.4f);
-                            bool on_ring_edge   = (r < R_INNER_MIN + 2.4f || r > R_INNER_MAX - 2.4f);
-                            if (sel && (on_radial_edge || on_ring_edge)) {
-                                sc = sel_bdr;
-                            } else if (sec_pos < 0.8f || sec_pos > 29.2f) {
-                                sc = sep_col;
-                            } else {
-                                sc = inner_fill[sec];
-                            }
-                        } else if (r <= R_HUB_MAX) {
-                            bool sel = (g_cur_ring == 2);
-                            if (r > R_HUB_MAX - 2.6f) {
-                                sc = sel ? sel_bdr : RGB(96, 165, 250);
-                            } else {
-                                sc = hub_fill;
-                            }
-                        } else {
-                            sc = sep_col;
-                        }
-                    }
-                    r_acc += (sc >> 16) & 0xFF;
-                    g_acc += (sc >> 8)  & 0xFF;
-                    b_acc += sc & 0xFF;
+            for (int k = 0; k < 4; k++) {
+                uint8_t code = cell[k];
+                uint8_t z    = code >> 4;
+                uint8_t sec  = code & 0x0Fu;
+                uint32_t sc  = bg_col;
+                switch (z) {
+                    case 0: sc = bg_col; break;
+                    case 1: sc = sep_col; break;
+                    case 2: sc = hub_fill; break;
+                    case 9: sc = hub_rim; break;
+                    case 3: sc = outer_fill[sec]; break;
+                    case 4: sc = (g_cur_ring == 0 && g_cur_sector == sec) ? sel_bdr : sep_col; break;
+                    case 5: sc = (g_cur_ring == 0 && g_cur_sector == sec) ? sel_bdr : outer_fill[sec]; break;
+                    case 6: sc = inner_fill[sec]; break;
+                    case 7: sc = (g_cur_ring == 1 && g_cur_sector == sec) ? sel_bdr : sep_col; break;
+                    case 8: sc = (g_cur_ring == 1 && g_cur_sector == sec) ? sel_bdr : inner_fill[sec]; break;
                 }
+                r_acc += (sc >> 16) & 0xFF;
+                g_acc += (sc >> 8)  & 0xFF;
+                b_acc += sc & 0xFF;
             }
-            g_fb[py * NATIVE_W + px] = RGB(r_acc >> 2, g_acc >> 2, b_acc >> 2);
+            fb_row[px] = RGB(r_acc >> 2, g_acc >> 2, b_acc >> 2);
         }
     }
 
@@ -1952,36 +2226,42 @@ static void render_bottom_progression_bar(void) {
 }
 
 static void render_help_modal(void) {
-    int mx = 20, my = 20, mw = NATIVE_W - 40, mh = NATIVE_H - 40;
+    int mx = 20, my = 14, mw = NATIVE_W - 40, mh = NATIVE_H - 28;
     fill_rect(mx, my, mw, mh, RGB(15, 23, 38));
     draw_border(mx, my, mw, mh, 2, RGB(96, 165, 250));
     draw_border(mx + 3, my + 3, mw - 6, mh - 6, 1, RGB(37, 99, 235));
 
-    fill_rect(mx + 4, my + 4, mw - 8, 42, RGB(28, 39, 60));
-    fill_rect(mx + 4, my + 46, mw - 8, 2, RGB(64, 82, 115));
-    draw_pill(mx + 12, my + 9, 84, 30, RGB(37, 99, 235), RGB(147, 197, 253));
-    draw_text_centered(FONT_UI_13, mx + 12, my + 9, 84, 30, "HELP", RGB(255, 255, 255));
-    draw_text(FONT_UI_20, mx + 110, my + 12, "RG35XXSP CHORDWHEEL & EKS SYNTH", RGB(248, 250, 252));
+    fill_rect(mx + 4, my + 4, mw - 8, 40, RGB(28, 39, 60));
+    fill_rect(mx + 4, my + 44, mw - 8, 2, RGB(64, 82, 115));
+    draw_pill(mx + 12, my + 8, 76, 28, RGB(37, 99, 235), RGB(147, 197, 253));
+    draw_text_centered(FONT_UI_13, mx + 12, my + 8, 76, 28, "HELP", RGB(255, 255, 255));
+    draw_text(FONT_UI_20, mx + 100, my + 10, "CHORDWHEEL - QUICK GUIDE & PRESETS", RGB(248, 250, 252));
 
-    int py = my + 56;
-    fill_rect(mx + 14, py, mw - 28, 82, RGB(23, 33, 52));
-    draw_border(mx + 14, py, mw - 28, 82, 2, RGB(56, 189, 248));
+    fill_rect(mx + 4, my + 46, mw - 8, 22, RGB(19, 29, 48));
+    fill_rect(mx + 4, my + 68, mw - 8, 1, RGB(48, 66, 98));
+    draw_text_centered(FONT_UI_13, mx + 8, my + 46, mw - 16, 22,
+                       "Explore Circle of Fifths harmony, 3 guitar voicings & 4-bar chord loops.",
+                       RGB(186, 230, 253));
+
+    int py = my + 74;
+    fill_rect(mx + 14, py, mw - 28, 72, RGB(23, 33, 52));
+    draw_border(mx + 14, py, mw - 28, 72, 2, RGB(56, 189, 248));
 
     char p_str[96];
-    snprintf(p_str, sizeof(p_str), "PROGRESSION PRESET (L/R): %s", k_presets[g_preset_idx].name);
+    snprintf(p_str, sizeof(p_str), "PRESET (LEFT/RIGHT): %s", k_presets[g_preset_idx].name);
     draw_text_centered(FONT_UI_16, mx + 14, py + 10, mw - 28, 24, p_str, RGB(250, 204, 21));
-    draw_text_centered(FONT_UI_13, mx + 14, py + 44, mw - 28, 20,
-                       "[A]/[R2]: Start/Stop 4-Bar Looper  |  [L2]: Cycle Guitar Timbre",
+    draw_text_centered(FONT_UI_13, mx + 14, py + 40, mw - 28, 20,
+                       "[A] / [R2]: Start/Stop 4-Bar Looper  |  [L2]: Cycle Guitar Timbre",
                        RGB(125, 211, 252));
 
-    int ky = py + 94;
+    int ky = py + 82;
     static const struct {
         const char *btn;
         const char *desc;
     } k_help_rows[7] = {
         { "LEFT / RIGHT", "Rotate Wheel (4ths / 5ths around Circle)" },
         { "UP / DOWN",    "Switch Outer Major / Inner Minor / Center vii Ring" },
-        { "A Button",     "Strum 6-String EKS Guitar Voicing (Background Synth)" },
+        { "A Button",     "Strum 6-String Guitar Voicing (SF2 / EKS Synth)" },
         { "B Button",     "Toggle Triads (C, Am, G) <-> 7ths (Cmaj7, Am7, G7)" },
         { "L1 / R1",      "Cycle Guitar Voicing (Open/CAGED, E-Barre, A-Barre)" },
         { "L2 / R2",      "L2: Timbre (Acoustic/Chorus/Nylon) | R2: Toggle Looper" },
@@ -1996,6 +2276,7 @@ static void render_help_modal(void) {
     }
 
     fill_rect(mx + 4, my + mh - 34, mw - 8, 30, RGB(12, 18, 30));
+    fill_rect(mx + 4, my + mh - 34, mw - 8, 1, RGB(51, 65, 85));
     draw_text_centered(FONT_UI_13, mx, my + mh - 32, mw, 26,
                        "Press [Y] or [B] to return to the Circle of Fifths",
                        RGB(186, 230, 253));
@@ -2021,6 +2302,31 @@ int main(int argc, char *argv[]) {
 
     resolve_config_path();
     load_config();
+
+    /* Automated Audio Self-Test (--audio-test) */
+    if (argc >= 2 && strcmp(argv[1], "--audio-test") == 0) {
+        strum_current_selection();
+        int16_t pcm[512 * AUDIO_CHANNELS];
+        double energy = 0.0;
+        int peak = 0;
+        int total_frames = SAMPLE_RATE / 2;
+        for (int done = 0; done < total_frames; done += 512) {
+            audio_callback(NULL, (uint8_t *)pcm, (int)sizeof(pcm));
+            for (int i = 0; i < 512 * AUDIO_CHANNELS; i++) {
+                int v = pcm[i];
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+                energy += (double)pcm[i] * (double)pcm[i];
+            }
+        }
+        double rms = sqrt(energy / (double)(total_frames * AUDIO_CHANNELS));
+        printf("chordwheel audio-test: sf2=%s path=%s peak=%d rms=%.1f\n",
+               rg35_sf2_ready(&g_sf2) ? "YES" : "NO",
+               rg35_sf2_ready(&g_sf2) ? g_sf2.loaded_path : "(fallback-eks)",
+               peak, rms);
+        rg35_sf2_free(&g_sf2);
+        return (peak > 100) ? 0 : 1;
+    }
 
     /* Automated Screenshot Mode (--screenshot-states <dir>) */
     if (argc >= 3 && strcmp(argv[1], "--screenshot-states") == 0) {
@@ -2091,7 +2397,6 @@ int main(int argc, char *argv[]) {
         if (p & BTN_L2) {
             g_timbre = (GuitarTimbre)((g_timbre + 1) % 3);
             strum_current_selection();
-            save_config();
         }
         if (p & BTN_R2) {
             g_loop_playing = !g_loop_playing;
@@ -2107,10 +2412,8 @@ int main(int argc, char *argv[]) {
         if (g_show_help) {
             if (p & BTN_LEFT) {
                 apply_progression_preset(g_preset_idx - 1);
-                save_config();
             } else if (p & BTN_RIGHT) {
                 apply_progression_preset(g_preset_idx + 1);
-                save_config();
             } else if (p & BTN_A) {
                 g_loop_playing = !g_loop_playing;
                 g_loop_step    = 0;
@@ -2136,7 +2439,6 @@ int main(int argc, char *argv[]) {
                     g_cur_sector = (g_cur_sector + 1) % 12;
                 }
                 strum_current_selection();
-                save_config();
             } else if (p & BTN_LEFT) {
                 g_loop_playing = false;
                 if (!g_key_locked) {
@@ -2149,17 +2451,14 @@ int main(int argc, char *argv[]) {
                     g_cur_sector = (g_cur_sector + 11) % 12;
                 }
                 strum_current_selection();
-                save_config();
             } else if (p & BTN_DOWN) {
                 g_loop_playing = false;
                 g_cur_ring = (g_cur_ring < 2) ? (g_cur_ring + 1) : 0;
                 strum_current_selection();
-                save_config();
             } else if (p & BTN_UP) {
                 g_loop_playing = false;
                 g_cur_ring = (g_cur_ring > 0) ? (g_cur_ring - 1) : 2;
                 strum_current_selection();
-                save_config();
             } else if (p & BTN_A) {
                 strum_current_selection();
             } else if (p & BTN_B) {
@@ -2168,26 +2467,21 @@ int main(int argc, char *argv[]) {
                     g_prog[i].use_7th = g_seventh_mode;
                 }
                 strum_current_selection();
-                save_config();
             } else if (p & BTN_R1) {
                 g_voicing_idx = (g_voicing_idx + 1) % 3;
                 strum_current_selection();
-                save_config();
             } else if (p & BTN_L1) {
                 g_voicing_idx = (g_voicing_idx + 2) % 3;
                 strum_current_selection();
-                save_config();
             } else if (p & BTN_SELECT) {
                 g_key_locked = !g_key_locked;
                 if (!g_key_locked) g_cur_sector = g_key_sector;
-                save_config();
             } else if (p & BTN_X) {
                 g_prog[g_prog_write_idx].sector  = g_cur_sector;
                 g_prog[g_prog_write_idx].ring    = g_cur_ring;
                 g_prog[g_prog_write_idx].use_7th = g_seventh_mode;
                 g_prog_write_idx = (g_prog_write_idx + 1) % 4;
                 strum_current_selection();
-                save_config();
             }
         }
 

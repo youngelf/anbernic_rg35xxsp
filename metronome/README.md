@@ -1,45 +1,53 @@
-# Anbernic RG35XX SP Metronome (Knulli Scarab / Batocera & Linux Desktop)
+# Anbernic RG 35xxSP Metronome (`640x480`)
 
-A precision C metronome built for the **Anbernic RG35XX SP** clamshell handheld running **Knulli (Scarab / Batocera)** (Allwinner H700 `aarch64`, **640×480** IPS display), plus a native **x86_64 Linux (X11)** target for desktop testing.
+A sample-accurate studio metronome built for the **Anbernic RG 35xxSP** clamshell handheld running **Knulli (Scarab / Batocera)** (Allwinner H700 `aarch64`, **640x480** IPS display), plus a native **x86_64 Linux (X11)** target for desktop testing.
 
-![Metronome Screenshot](promo/metronome_grab.png)
+| Main Metronome View | Quick Guide & Controls (`Y`) |
+| :---: | :---: |
+| ![Metronome Screenshot](promo/metronome_grab.png) | ![Metronome Help Overlay](promo/metronome_help.png) |
 
 ## Features
-- **Native 640×480 Resolution**: Crisp 640×480 display output via Knulli's `libSDL2-2.0.so.0` (with automatic fallback to `/dev/fb0`).
-- **Maximum-Loudness Audio**: Full-scale (`±32767` rail-to-rail) saturated harmonic clicks across both stereo channels at 44.1 kHz via SDL2 Audio (with automatic ALSA `libasound.so.2` fallback). Use the RG35XX SP's physical side volume buttons (`VOL+` / `VOL-`) to adjust loudness.
-- **5 Time Signatures**: Cycle between **`4/4`**, **`3/4`**, **`2/4`**, **`5/4`**, and **`7/4`** time.
-- **Beat 1 Accent**: High-pitched (`1760 Hz`) accented Beat 1 click + red `ACC` beat box flash, and `1000 Hz` normal beat clicks + green beat box flashes, plus a swinging pendulum bar.
-- **Persistent Settings**: Automatically saves BPM and time signature to `/userdata/system/.metronome.cfg` on Knulli (or `~/.metronome.cfg` on Linux).
+- **Sample-Accurate 44.1 kHz Background Audio Clock**: Computes beat boundaries directly on the dedicated background audio thread (zero UI-thread jitter), using SDL2 Audio on Knulli (with automatic ALSA `libasound.so.2` fallback) and PulseAudio on Linux desktop.
+- **4 Studio Click Kits (`L2`)**: Cycle between **`WOODBLOCK`**, **`DRUM RIM`**, **`CLASSIC`**, and **`MARIMBA`** using SoundFont 2 (`GeneralUser-GS.sf2` / `pocketband.sf2` via `../rg35xxsp_sf2.h`) with room reverb and crisp studio DSP fallbacks.
+- **5 Time Signatures**: Cycle between **`4/4`**, **`3/4`**, **`2/4`**, **`5/4`**, and **`7/4`** time with Beat 1 red `ACC` accent flashes, green regular beat boxes, classical tempo markings (`GRAVE` to `PRESTISSIMO`), and a smooth pendulum phase bar.
+- **4-Bar Lock-In Stealth Beat Drop (`L1` / `R1`)**: Adjust click drop probability from **`0%` to `100%`** in `5%` steps. The first **4 measures** always play 100% of clicks so you can lock into the groove before clicks randomly drop out to test your internal clock.
+- **Continuous Tempo Hold (`30-260 BPM`)**: Tap D-Pad `UP` / `DOWN` for `+/-1 BPM` precision, or hold for smooth accelerating continuous sweep.
+- **Persistent Settings**: Automatically saves BPM, time signature, and click kit to `/userdata/system/.metronome.cfg` on Knulli (or `~/.metronome.cfg` on Linux).
 
 ---
 
-## Controls (Anbernic RG35XX SP & Linux Desktop)
+## Controls (Anbernic RG 35xxSP & Linux Desktop)
 
-| Action | Anbernic RG35XX SP Button | Linux Desktop Key |
+| Action | Anbernic RG 35xxSP Button | Linux Desktop Key (`metronome_linux`) |
 | :--- | :--- | :--- |
-| **Play / Pause** | **A** | `A`, `Space`, `Enter`, or `Left Alt` |
-| **Random Beat Drop (`0%`, `15%`, `30%`, `50%`)** | **B** | `B` or `Left Ctrl` |
-| **Increase / Decrease Tempo (±1 BPM, hold for continuous)** | **D-Pad UP** / **DOWN** | `Up Arrow` / `Down Arrow` |
+| **Play / Pause** | **A** | `A`, `Space`, `Z`, or `Alt` |
+| **Reset Tempo to 120 BPM** | **B** | `B`, `Backspace`, or `Ctrl` |
+| **Increase / Decrease Tempo (`+/-1 BPM`, hold for continuous)** | **D-Pad UP** / **DOWN** | `Up Arrow` / `Down Arrow` |
 | **Cycle Time Signature (`4/4`, `3/4`, `2/4`, `5/4`, `7/4`)** | **D-Pad LEFT** / **RIGHT** | `Left Arrow` / `Right Arrow` |
-| **Fast Tempo Step (±5 BPM)** | **R1 / R2** (+5) and **L1 / L2** (-5) | `Page Up` / `Page Down` or `]` / `[` |
-| **Reset to 120 BPM** | **X** | `R` or `X` |
-| **Save & Quit to Knulli** | **MENU (`M`)** | `Q` or `ESC` |
+| **Adjust Stealth Beat Drop (`-5%` / `+5%`, `0%-100%`)** | **L1** / **R1** | `L` / `Q` / `[` / `PgUp` and `R` / `E` / `]` / `PgDn` |
+| **Cycle 4 Studio Click Kits (`Woodblock`, `Drum Rim`, `Classic`, `Marimba`)** | **L2** | `1` |
+| **Toggle Quick Guide & Controls Overlay** | **Y** | `Y` |
+| **Save Settings & Exit** | **MENU (`M`)** | `Esc` |
+
+Use the RG 35xxSP's physical side volume buttons (`VOL+` / `VOL-`) to adjust speaker or headphone loudness.
 
 ---
 
-## Copying to Your Anbernic RG35XX SP (Knulli SD Card)
+## Copying to Your Anbernic RG 35xxSP (Knulli SD Card)
 
-Run `make` (or `make package`) to generate the ready-to-copy `sdcard_package/` folder:
+Run `make` (or `make package`) to build both targets and populate `sdcard_package/`:
 ```bash
 cd metronome
-make
+make all
 ```
 
-Copy the contents of `sdcard_package/roms/ports/` to the **`roms/ports/`** directory on your Knulli SD card (`SHARE` / `/userdata` partition):
-- `sdcard_package/roms/ports/Metronome.sh` -> `/userdata/roms/ports/Metronome.sh` (or `roms/ports/Metronome.sh` on the SD card)
-- `sdcard_package/roms/ports/metronome/` -> `/userdata/roms/ports/metronome/` (or `roms/ports/metronome/` on the SD card)
+Copy the contents of `sdcard_package/roms/ports/` to `/userdata/roms/ports/` on your Knulli SD card:
+- `sdcard_package/roms/ports/Metronome.sh` -> `/userdata/roms/ports/Metronome.sh`
+- `sdcard_package/roms/ports/metronome/` -> `/userdata/roms/ports/metronome/`
 
-Then in Knulli (EmulationStation), press **START -> Game Settings -> Update Games Lists**, open the **Ports** system, and launch **Metronome**.
+For upgraded SoundFont studio kits, copy `../soundfonts/GeneralUser-GS.sf2` to `/userdata/roms/ports/soundfonts/GeneralUser-GS.sf2`.
+
+Then in Knulli (EmulationStation), press **START -> Game Settings -> Update Games Lists**, open **Ports**, and launch **Metronome**.
 
 ---
 

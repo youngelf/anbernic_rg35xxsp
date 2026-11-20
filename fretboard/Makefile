@@ -47,11 +47,11 @@ x64: $(HOST_TARGET)
 
 host: $(HOST_TARGET)
 
-$(TARGET): $(SRC) fretboard_font.h
+$(TARGET): $(SRC) fretboard_font.h ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(ARM_CC) $(ARM_CFLAGS) -o $(TARGET) $(SRC) $(ARM_LDFLAGS)
 	-$(ARM_STRIP) $(TARGET)
 
-$(HOST_TARGET): $(SRC) fretboard_font.h
+$(HOST_TARGET): $(SRC) fretboard_font.h ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(HOST_CC) $(HOST_CFLAGS) -o $(HOST_TARGET) $(SRC) $(HOST_LDFLAGS)
 
 run-linux: $(HOST_TARGET)

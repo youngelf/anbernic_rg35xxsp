@@ -33,14 +33,14 @@ Every `.bmp` file in `logos/` and `backup/` is formatted to match Knulli Scarab'
 
 ## Controls (Hardware & Desktop Linux X11)
 
-| Button / Key | Action |
-| :--- | :--- |
-| **D-Pad Up / Down / Left / Right** (or Arrow Keys) | Cycle through the 5 boot logo themes |
-| **Button A** (or `A` / `Space` / `Z`) | Open **Flash Boot Logo** confirmation modal; press **A** again to flash & verify |
-| **Button B** (or `B`) | Open **Revert to Stock** confirmation modal; press **A** to restore factory `bootlogo.bmp` (or cancel modal) |
-| **Button SELECT** (or `Tab` / `Backspace`) | Toggle unobstructed **1:1 Full-Screen `640x480` View** (hides top/bottom HUD bars) |
-| **Button Y** (or `Y` / `H`) | Toggle **Controls Help** overlay; press **Y** or **B** to resume |
-| **MENU** (or `Esc` / `Q` on Desktop) | Exit Boot Logo Customizer |
+| Action | Anbernic RG 35xxSP Button | Linux Desktop Key (`boot_logo_linux`) |
+| :--- | :--- | :--- |
+| **Cycle Through the 5 Boot Logo Themes** | **D-Pad (`UP`/`DOWN`/`LEFT`/`RIGHT`)** or **L1 / R1** | `Arrow Keys` or `L`/`Q`/`[`/`PgUp` and `R`/`E`/`]`/`PgDn` |
+| **Open Flash Confirmation / Confirm & Flash** | **A** | `A`, `Space`, `Z`, or `Alt` |
+| **Open Revert to Stock (or Exit 1:1 Full View / Cancel Modal)** | **B** | `B`, `Backspace`, or `Ctrl` |
+| **Toggle Unobstructed 1:1 Full-Screen `640x480` View** | **SELECT** | `Tab` |
+| **Toggle Quick Guide & Controls Help Overlay** | **Y** | `Y` |
+| **Exit Boot Logo Customizer** | **MENU (`M`)** | `Esc` |
 
 ---
 

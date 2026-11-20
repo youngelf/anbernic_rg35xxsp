@@ -50,14 +50,13 @@ A single-screen bedside and desk clock for the **Anbernic RG 35xxSP** (Allwinner
 | :--- | :--- | :--- |
 | **Shift Local Timezone (`-30m` / `+30m`, hold for continuous)** | **D-Pad LEFT** / **RIGHT** | `Left Arrow` / `Right Arrow` |
 | **Adjust Brightness (`1..10`, hold for continuous)** | **D-Pad UP** / **DOWN** | `Up Arrow` / `Down Arrow` |
-| **Toggle Digital (Retro LED 24H) ↔ Analog Clock** | **SELECT** | `Tab` / `Backspace` |
-| **Open Alarm Set Screen / Confirm & Play Test Alarm** | **A** | `A` (or `Space` / `Z` / `Left Alt`) |
-| **Cancel / Turn Off Alarm (in Alarm Set Screen)** | **B** | `B` (or `Left Ctrl`) |
-| **Quick-Toggle Alarm ON / OFF** | **B** | `B` |
-| **Show Controls Screen / Resume Clock** | **Y** | `Y` (or `H`) |
-| **Fast Alarm Minute Step (`-5m` / `+5m` in Alarm Set Screen)** | **L1 / L2** (`-5m`) and **R1 / R2** (`+5m`) | `L` / `Q` / `[` / `1` (`-5m`) and `R` / `E` / `]` / `2` (`+5m`) |
-| **Volume Up / Down (plays confirmation alarm at end)** | **VOL+** (`115`) / **VOL-** (`114`) | `+` / `=` and `-` / `_` |
-| **Save Configuration & Exit** | **MENU (`M`)** | `M`, `Q`, or `ESC` |
+| **Toggle Digital (Retro LED 24H) <-> Analog Clock** | **SELECT** | `Tab` |
+| **Open Alarm Set Screen / Save & Play Test Alarm** | **A** | `A`, `Space`, `Z`, or `Alt` |
+| **Quick-Toggle Alarm ON/OFF (Clock) / Disable Alarm (Alarm Set)** | **B** | `B`, `Backspace`, or `Ctrl` |
+| **Fast Alarm Minute Step (`-5m` / `+5m` in Alarm Set)** | **L1 / L2** (`-5m`) and **R1 / R2** (`+5m`) | `L`/`Q`/`[`/`PgUp`/`1` (`-5m`) and `R`/`E`/`]`/`PgDn`/`2` (`+5m`) |
+| **Volume Up / Down (plays confirmation tone on release)** | **VOL+** / **VOL-** | `+` / `=` and `-` / `_` |
+| **Toggle Quick Guide & Controls Screen** | **Y** | `Y` |
+| **Save Configuration & Exit** | **MENU (`M`)** | `Esc` |
 
 ---
 

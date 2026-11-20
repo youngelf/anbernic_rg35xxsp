@@ -27,7 +27,15 @@
 #include <sys/types.h>
 
 #if defined(HOST_X11) || defined(TARGET_RG35XXSP)
+#include <pthread.h>
+#include <dlfcn.h>
 #include "../rg35xxsp_input.h"
+#include "../rg35xxsp_keepawake.h"
+#define RG35XXSP_SF2_IMPLEMENTATION
+#include "../rg35xxsp_sf2.h"
+#define POMO_AUDIO_RATE     44100
+#define POMO_AUDIO_CHANNELS 2
+static void pomodoro_audio_cleanup(void);
 #endif
 
 #define SCREEN_W 320
@@ -167,10 +175,103 @@ static void SDL_JoystickOpen(int idx) { (void)idx; }
 #endif /* HOST_X11 || TARGET_RG35XXSP */
 
 #if defined(HOST_X11)
-static int SDL_InitSubSystem(Uint32 flags) { (void)flags; return -1; }
-static int SDL_OpenAudio(SDL_AudioSpec *d, SDL_AudioSpec *o) { (void)d; (void)o; return -1; }
-static void SDL_PauseAudio(int pause_on) { (void)pause_on; }
-static void SDL_CloseAudio(void) {}
+static void (*g_host_audio_cb)(void *, Uint8 *, int) = NULL;
+static void *g_host_audio_ud = NULL;
+static pthread_t g_host_audio_thread;
+static volatile bool g_host_audio_running = false;
+static volatile bool g_host_audio_paused = true;
+
+typedef struct pa_simple pa_simple;
+typedef struct {
+    int format;
+    uint32_t rate;
+    uint8_t channels;
+} pa_sample_spec;
+
+#define PA_STREAM_PLAYBACK 1
+#define PA_SAMPLE_S16LE    3
+
+typedef pa_simple* (*pa_simple_new_fn)(const char*, const char*, int, const char*,
+                                       const char*, const pa_sample_spec*,
+                                       const void*, const void*, int*);
+typedef int (*pa_simple_write_fn)(pa_simple*, const void*, size_t, int*);
+typedef void (*pa_simple_free_fn)(pa_simple*);
+
+static void *host_audio_worker(void *arg) {
+    (void)arg;
+    void *pa_lib = dlopen("libpulse-simple.so.0", RTLD_LAZY);
+    pa_simple *pa = NULL;
+    pa_simple_new_fn fn_new = NULL;
+    pa_simple_write_fn fn_write = NULL;
+    pa_simple_free_fn fn_free = NULL;
+
+    if (pa_lib) {
+        fn_new = (pa_simple_new_fn)dlsym(pa_lib, "pa_simple_new");
+        fn_write = (pa_simple_write_fn)dlsym(pa_lib, "pa_simple_write");
+        fn_free = (pa_simple_free_fn)dlsym(pa_lib, "pa_simple_free");
+        if (fn_new && fn_write && fn_free) {
+            pa_sample_spec ss = { PA_SAMPLE_S16LE, POMO_AUDIO_RATE, POMO_AUDIO_CHANNELS };
+            int err = 0;
+            pa = fn_new(NULL, "RG35XXSP Pomodoro", PA_STREAM_PLAYBACK, NULL, "Pomodoro Chime",
+                        &ss, NULL, NULL, &err);
+        }
+    }
+
+    const int chunk_frames = 512;
+    const int chunk_bytes = chunk_frames * POMO_AUDIO_CHANNELS * 2;
+    int16_t buf[512 * POMO_AUDIO_CHANNELS];
+
+    while (g_host_audio_running) {
+        if (!g_host_audio_paused && g_host_audio_cb) {
+            g_host_audio_cb(g_host_audio_ud, (Uint8 *)buf, chunk_bytes);
+        } else {
+            memset(buf, 0, (size_t)chunk_bytes);
+        }
+        if (pa && fn_write) {
+            int err = 0;
+            fn_write(pa, buf, (size_t)chunk_bytes, &err);
+        } else {
+            usleep((chunk_frames * 1000000ULL) / POMO_AUDIO_RATE);
+        }
+    }
+
+    if (pa && fn_free) fn_free(pa);
+    if (pa_lib) dlclose(pa_lib);
+    return NULL;
+}
+
+static int SDL_InitSubSystem(Uint32 flags) {
+    (void)flags;
+    return 0;
+}
+
+static int SDL_OpenAudio(SDL_AudioSpec *desired, SDL_AudioSpec *obtained) {
+    if (!desired || !desired->callback) return -1;
+    if (obtained) *obtained = *desired;
+    g_host_audio_cb = desired->callback;
+    g_host_audio_ud = desired->userdata;
+    g_host_audio_paused = true;
+    g_host_audio_running = true;
+    if (pthread_create(&g_host_audio_thread, NULL, host_audio_worker, NULL) != 0) {
+        g_host_audio_running = false;
+        return -1;
+    }
+    return 0;
+}
+
+static void SDL_PauseAudio(int pause_on) {
+    g_host_audio_paused = (pause_on != 0);
+}
+
+static void SDL_CloseAudio(void) {
+    if (g_host_audio_running) {
+        g_host_audio_running = false;
+        pthread_join(g_host_audio_thread, NULL);
+    }
+    g_host_audio_cb = NULL;
+    g_host_audio_ud = NULL;
+    pomodoro_audio_cleanup();
+}
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -211,7 +312,7 @@ static SDLKey mask_to_sdlkey(uint32_t mask) {
     if (mask & BTN_START)     return SDLK_RETURN;     /* V90_BTN_START */
     if (mask & BTN_A)         return SDLK_LALT;       /* V90_BTN_A (Start/Pause) */
     if (mask & BTN_B)         return SDLK_LCTRL;      /* V90_BTN_B (Reset Timer) */
-    if (mask & BTN_X)         return SDLK_LSHIFT;     /* V90_BTN_X (Reset Timer) */
+    if (mask & BTN_X)         return SDLK_LSHIFT;     /* V90_BTN_X (unused) */
     if (mask & BTN_Y)         return SDLK_SPACE;      /* V90_BTN_Y (Help) */
     if (mask & BTN_L1)        return SDLK_TAB;        /* V90_BTN_L1 (-1 min) */
     if (mask & BTN_R1)        return SDLK_BACKSPACE;  /* V90_BTN_R1 (+1 min) */
@@ -550,32 +651,119 @@ static int SDL_Init(Uint32 flags) {
     return 0;
 }
 
+static void (*g_alsa_audio_cb)(void *, Uint8 *, int) = NULL;
+static void *g_alsa_audio_ud = NULL;
+static pthread_t g_alsa_thread;
+static volatile bool g_alsa_running = false;
+static volatile bool g_alsa_paused = true;
+static bool g_use_sdl2_audio = false;
+
+typedef int  (*snd_pcm_open_fn)(void**, const char*, int, int);
+typedef int  (*snd_pcm_set_params_fn)(void*, int, int, unsigned int, unsigned int, int, unsigned int);
+typedef long (*snd_pcm_writei_fn)(void*, const void*, unsigned long);
+typedef int  (*snd_pcm_recover_fn)(void*, int, int);
+typedef int  (*snd_pcm_close_fn)(void*);
+
+static void *alsa_audio_worker(void *arg) {
+    (void)arg;
+    void *asound = dlopen("libasound.so.2", RTLD_LAZY);
+    void *pcm = NULL;
+    snd_pcm_open_fn fn_open = NULL;
+    snd_pcm_set_params_fn fn_params = NULL;
+    snd_pcm_writei_fn fn_writei = NULL;
+    snd_pcm_recover_fn fn_recover = NULL;
+    snd_pcm_close_fn fn_close = NULL;
+
+    if (asound) {
+        fn_open = (snd_pcm_open_fn)dlsym(asound, "snd_pcm_open");
+        fn_params = (snd_pcm_set_params_fn)dlsym(asound, "snd_pcm_set_params");
+        fn_writei = (snd_pcm_writei_fn)dlsym(asound, "snd_pcm_writei");
+        fn_recover = (snd_pcm_recover_fn)dlsym(asound, "snd_pcm_recover");
+        fn_close = (snd_pcm_close_fn)dlsym(asound, "snd_pcm_close");
+        if (fn_open && fn_params && fn_writei && fn_close) {
+            /* SND_PCM_STREAM_PLAYBACK = 0, SND_PCM_FORMAT_S16_LE = 2, SND_PCM_ACCESS_RW_INTERLEAVED = 3 */
+            if (fn_open(&pcm, "default", 0, 0) < 0) {
+                if (fn_open(&pcm, "plughw:0,0", 0, 0) < 0) {
+                    pcm = NULL;
+                }
+            }
+            if (pcm) {
+                fn_params(pcm, 2, 3, POMO_AUDIO_CHANNELS, POMO_AUDIO_RATE, 1, 40000);
+            }
+        }
+    }
+
+    const int chunk_frames = 512;
+    const int chunk_bytes = chunk_frames * POMO_AUDIO_CHANNELS * 2;
+    int16_t buf[512 * POMO_AUDIO_CHANNELS];
+
+    while (g_alsa_running) {
+        if (!g_alsa_paused && g_alsa_audio_cb) {
+            g_alsa_audio_cb(g_alsa_audio_ud, (Uint8 *)buf, chunk_bytes);
+        } else {
+            memset(buf, 0, (size_t)chunk_bytes);
+        }
+        if (pcm && fn_writei) {
+            long written = fn_writei(pcm, buf, (unsigned long)chunk_frames);
+            if (written < 0 && fn_recover) {
+                fn_recover(pcm, (int)written, 1);
+            }
+        } else {
+            usleep((chunk_frames * 1000000ULL) / POMO_AUDIO_RATE);
+        }
+    }
+
+    if (pcm && fn_close) fn_close(pcm);
+    if (asound) dlclose(asound);
+    return NULL;
+}
+
 static int SDL_InitSubSystem(Uint32 flags) {
     (void)flags;
     if (fn_SDL2_InitSubSystem) {
-        return fn_SDL2_InitSubSystem(SDL2_INIT_AUDIO);
+        fn_SDL2_InitSubSystem(SDL2_INIT_AUDIO);
     }
-    return fn_SDL2_OpenAudio ? 0 : -1;
+    return 0; /* ALSA background thread fallback always available */
 }
 
 static int SDL_OpenAudio(SDL_AudioSpec *desired, SDL_AudioSpec *obtained) {
-    (void)obtained;
-    if (fn_SDL2_OpenAudio) {
-        return fn_SDL2_OpenAudio(desired, NULL);
+    if (!desired || !desired->callback) return -1;
+    if (obtained) *obtained = *desired;
+    if (fn_SDL2_OpenAudio && fn_SDL2_OpenAudio(desired, NULL) == 0) {
+        g_use_sdl2_audio = true;
+        return 0;
     }
-    return -1;
+    g_alsa_audio_cb = desired->callback;
+    g_alsa_audio_ud = desired->userdata;
+    g_alsa_paused = true;
+    g_alsa_running = true;
+    if (pthread_create(&g_alsa_thread, NULL, alsa_audio_worker, NULL) != 0) {
+        g_alsa_running = false;
+        return -1;
+    }
+    return 0;
 }
 
 static void SDL_PauseAudio(int pause_on) {
-    if (fn_SDL2_PauseAudio) {
+    if (g_use_sdl2_audio && fn_SDL2_PauseAudio) {
         fn_SDL2_PauseAudio(pause_on);
+    } else {
+        g_alsa_paused = (pause_on != 0);
     }
 }
 
 static void SDL_CloseAudio(void) {
-    if (fn_SDL2_CloseAudio) {
+    if (g_use_sdl2_audio && fn_SDL2_CloseAudio) {
         fn_SDL2_CloseAudio();
+        g_use_sdl2_audio = false;
     }
+    if (g_alsa_running) {
+        g_alsa_running = false;
+        pthread_join(g_alsa_thread, NULL);
+    }
+    g_alsa_audio_cb = NULL;
+    g_alsa_audio_ud = NULL;
+    pomodoro_audio_cleanup();
 }
 
 static const char *SDL_GetError(void) {
@@ -628,6 +816,7 @@ static SDL_Surface *SDL_SetVideoMode(int width, int height, int bpp, Uint32 flag
     g_fb_surface.format = &g_dummy_fmt;
     g_fb_surface.pixels = (Uint32 *)calloc((size_t)surf_w * surf_h, sizeof(Uint32));
     if (!g_fb_surface.pixels) return NULL;
+    rg35xxsp_keepawake_init("pomodoro", g_sdl2_lib);
     return &g_fb_surface;
 }
 
@@ -638,6 +827,7 @@ static void SDL_WM_SetCaption(const char *title, const char *icon) {
 
 static void SDL_Flip(SDL_Surface *screen) {
     if (!screen || !screen->pixels) return;
+    rg35xxsp_keepawake_tick_now();
 
     if (g_use_sdl2_video) {
         fn_SDL2_UpdateTexture(g_sdl2_tex, NULL, screen->pixels, screen->w * 4);
@@ -707,7 +897,7 @@ static SDLKey translate_rg35xxsp_key(uint16_t code) {
     if (mask & BTN_START)     return SDLK_RETURN;     /* V90_BTN_START */
     if (mask & BTN_A)         return SDLK_LALT;       /* V90_BTN_A (Start/Pause) */
     if (mask & BTN_B)         return SDLK_LCTRL;      /* V90_BTN_B (Reset Timer) */
-    if (mask & BTN_X)         return SDLK_LSHIFT;     /* V90_BTN_X (Reset Timer) */
+    if (mask & BTN_X)         return SDLK_LSHIFT;     /* V90_BTN_X (unused) */
     if (mask & BTN_Y)         return SDLK_SPACE;      /* V90_BTN_Y (Help) */
     if (mask & BTN_L1)        return SDLK_TAB;        /* V90_BTN_L1 (-1 min) */
     if (mask & BTN_R1)        return SDLK_BACKSPACE;  /* V90_BTN_R1 (+1 min) */
@@ -736,6 +926,11 @@ static int SDL_PollEvent(SDL_Event *ev) {
         struct input_event ie;
         while (read(g_evdevs[i].fd, &ie, sizeof(ie)) == (ssize_t)sizeof(ie)) {
             if (ie.type == EV_KEY && (ie.value == 0 || ie.value == 1 || ie.value == 2)) {
+                uint32_t raw_mask = rg35xxsp_map_evkey(ie.code);
+                if (ie.value == 1) {
+                    if (raw_mask & BTN_LID_CLOSE) rg35xxsp_keepawake_set_lid_closed(true);
+                    if (raw_mask & BTN_LID_OPEN)  rg35xxsp_keepawake_set_lid_closed(false);
+                }
                 SDLKey sym = translate_rg35xxsp_key(ie.code);
                 if (ie.value == 0 || ie.value == 1 || sym == SDLK_ESCAPE) {
                     enqueue_key_event(ie.value ? SDL_KEYDOWN : SDL_KEYUP, sym);
@@ -774,6 +969,7 @@ static int SDL_PollEvent(SDL_Event *ev) {
 }
 
 static void SDL_Quit(void) {
+    rg35xxsp_keepawake_shutdown();
     for (int i = 0; i < g_num_evdevs; i++) {
         if (g_evdevs[i].fd >= 0) close(g_evdevs[i].fd);
     }
@@ -961,7 +1157,263 @@ static WorkStats g_stats;
 static char g_save_path[512];
 static char g_log_path[512];
 
-/* Audio alert state */
+/* =========================================================================
+ * Studio Stereo Bell / Chime Background Audio Engine
+ * ========================================================================= */
+#if defined(HOST_X11) || defined(TARGET_RG35XXSP)
+
+#define MAX_CHIME_EVENTS 8
+#define MAX_BELL_VOICES  6
+
+typedef struct {
+    bool  active;
+    bool  fired;
+    int   delay_samples;
+    int   gate_samples;
+    int   midi_note;
+    int   sf2_ch;
+    float vel;
+    float pan;
+} ChimeEvent;
+
+typedef struct {
+    bool     active;
+    double   phase;
+    double   freq;
+    uint32_t age;
+    uint32_t max_len;
+    float    vel;
+    float    gain_l;
+    float    gain_r;
+} BellVoice;
+
+static pthread_mutex_t g_audio_mutex = PTHREAD_MUTEX_INITIALIZER;
+static Rg35Sf2Engine   g_sf2;
+static bool            g_sf2_init_attempted = false;
+static bool            g_sf2_has_bell_layer = false;
+static bool            g_sf2_layer_dsp_shimmer = false;
+static ChimeEvent      g_chimes[MAX_CHIME_EVENTS];
+static BellVoice       g_bell_voices[MAX_BELL_VOICES];
+static int             g_tail_samples_rem = 0;
+
+static void init_sf2_in_audio_thread(void) {
+    if (g_sf2_init_attempted) return;
+    g_sf2_init_attempted = true;
+    /* Warm meditative room reverb (reverb_wet=0.28) for studio chime decay */
+    if (rg35_sf2_init(&g_sf2, POMO_AUDIO_RATE, 24, 0.28f, 1.28f)) {
+        int vibe_idx = tsf_get_presetindex(g_sf2.synth, 0, 11); /* Vibraphone */
+        int bell_idx = tsf_get_presetindex(g_sf2.synth, 0, 14); /* Tubular Bells */
+        int ep_idx   = tsf_get_presetindex(g_sf2.synth, 0, 5);  /* FM E.Piano fallback */
+        if (ep_idx < 0) ep_idx = tsf_get_presetindex(g_sf2.synth, 0, 4);
+        if (ep_idx < 0) ep_idx = 0;
+
+        int main_prog = (vibe_idx >= 0) ? 11 : ((ep_idx >= 0) ? ((tsf_get_presetindex(g_sf2.synth, 0, 5) >= 0) ? 5 : 4) : 0);
+        if (vibe_idx < 0 && tsf_get_presetindex(g_sf2.synth, 0, main_prog) < 0) main_prog = 0;
+
+        static const float k_pans[3] = { 0.34f, 0.50f, 0.66f };
+        for (int i = 0; i < 3; i++) {
+            rg35_sf2_set_channel_program(&g_sf2, i, 0, main_prog);
+            rg35_sf2_set_channel_pan_vol(&g_sf2, i, k_pans[i], 0.94f);
+        }
+
+        if (bell_idx >= 0) {
+            g_sf2_has_bell_layer = true;
+            for (int i = 0; i < 3; i++) {
+                rg35_sf2_set_channel_program(&g_sf2, 3 + i, 0, 14);
+                rg35_sf2_set_channel_pan_vol(&g_sf2, 3 + i, 1.0f - k_pans[i], 0.62f);
+            }
+        } else {
+            /* Compact SoundFont without Tubular Bells: layer subtle singing-bowl shimmer */
+            g_sf2_layer_dsp_shimmer = true;
+        }
+    }
+}
+
+static void pomodoro_audio_cleanup(void) {
+    pthread_mutex_lock(&g_audio_mutex);
+    rg35_sf2_free(&g_sf2);
+    g_sf2_init_attempted = false;
+    g_sf2_has_bell_layer = false;
+    g_sf2_layer_dsp_shimmer = false;
+    memset(g_chimes, 0, sizeof(g_chimes));
+    memset(g_bell_voices, 0, sizeof(g_bell_voices));
+    g_tail_samples_rem = 0;
+    pthread_mutex_unlock(&g_audio_mutex);
+}
+
+static void spawn_bell_voice_locked(int midi_note, float vel, float pan) {
+    int slot = 0;
+    uint32_t oldest = 0;
+    for (int i = 0; i < MAX_BELL_VOICES; i++) {
+        if (!g_bell_voices[i].active) { slot = i; break; }
+        if (g_bell_voices[i].age > oldest) { oldest = g_bell_voices[i].age; slot = i; }
+    }
+    BellVoice *v = &g_bell_voices[slot];
+    v->active  = true;
+    v->phase   = 0.0;
+    v->freq    = 440.0 * pow(2.0, ((double)midi_note - 69.0) / 12.0);
+    v->age     = 0;
+    v->max_len = (uint32_t)(POMO_AUDIO_RATE * 2.4);
+    v->vel     = vel;
+    float angle = pan * 1.5707963f;
+    v->gain_l  = cosf(angle);
+    v->gain_r  = sinf(angle);
+}
+
+static void audio_callback(void *userdata, Uint8 *stream, int len) {
+    (void)userdata;
+    int16_t *out = (int16_t *)stream;
+    int frames = len / (2 * POMO_AUDIO_CHANNELS);
+    if (frames <= 0) return;
+
+    pthread_mutex_lock(&g_audio_mutex);
+    init_sf2_in_audio_thread();
+
+    if (g_tail_samples_rem <= 0) {
+        memset(out, 0, (size_t)len);
+        pthread_mutex_unlock(&g_audio_mutex);
+        return;
+    }
+
+    bool sf2_ok = rg35_sf2_ready(&g_sf2);
+    float sf2_buf[1024 * 2];
+    int pos = 0;
+
+    while (pos < frames) {
+        int chunk = frames - pos;
+        if (chunk > 1024) chunk = 1024;
+
+        /* Advance chime scheduler to nearest note-on or note-off boundary */
+        for (int i = 0; i < MAX_CHIME_EVENTS; i++) {
+            ChimeEvent *ev = &g_chimes[i];
+            if (!ev->active) continue;
+            if (!ev->fired) {
+                if (ev->delay_samples <= 0) {
+                    ev->fired = true;
+                    if (sf2_ok) {
+                        rg35_sf2_note_on(&g_sf2, ev->sf2_ch, ev->midi_note, ev->vel);
+                        if (g_sf2_has_bell_layer) {
+                            rg35_sf2_note_on(&g_sf2, 3 + ev->sf2_ch, ev->midi_note, ev->vel * 0.72f);
+                        }
+                        if (g_sf2_layer_dsp_shimmer) {
+                            spawn_bell_voice_locked(ev->midi_note, ev->vel * 0.30f, 1.0f - ev->pan);
+                        }
+                    } else {
+                        spawn_bell_voice_locked(ev->midi_note, ev->vel * 0.85f, ev->pan);
+                    }
+                } else if (ev->delay_samples < chunk) {
+                    chunk = ev->delay_samples;
+                }
+            } else {
+                if (ev->gate_samples <= 0) {
+                    if (sf2_ok) {
+                        rg35_sf2_note_off(&g_sf2, ev->sf2_ch, ev->midi_note);
+                        if (g_sf2_has_bell_layer) {
+                            rg35_sf2_note_off(&g_sf2, 3 + ev->sf2_ch, ev->midi_note);
+                        }
+                    }
+                    ev->active = false;
+                } else if (ev->gate_samples < chunk) {
+                    chunk = ev->gate_samples;
+                }
+            }
+        }
+
+        if (sf2_ok) {
+            tsf_render_float(g_sf2.synth, sf2_buf, chunk, 0);
+        }
+
+        for (int i = 0; i < chunk; i++) {
+            float in_l = sf2_ok ? sf2_buf[i * 2]     : 0.0f;
+            float in_r = sf2_ok ? sf2_buf[i * 2 + 1] : 0.0f;
+
+            for (int vi = 0; vi < MAX_BELL_VOICES; vi++) {
+                BellVoice *v = &g_bell_voices[vi];
+                if (!v->active) continue;
+                double t = (double)v->age / (double)POMO_AUDIO_RATE;
+                double att = (t < 0.004) ? (0.5 - 0.5 * cos(3.14159265358979323846 * (t / 0.004))) : 1.0;
+                double p = v->phase;
+                /* Warm multi-harmonic singing bowl / tubular bell synthesis */
+                double s = 1.00 * sin(p)         * exp(-2.3 * t)
+                         + 0.42 * sin(2.000 * p) * exp(-3.8 * t)
+                         + 0.24 * sin(2.998 * p) * exp(-5.6 * t)
+                         + 0.14 * sin(4.020 * p) * exp(-8.5 * t)
+                         + 0.08 * sin(5.430 * p) * exp(-13.5 * t);
+                float sample = (float)(s * att * 0.45 * v->vel);
+                in_l += sample * v->gain_l;
+                in_r += sample * v->gain_r;
+
+                v->phase += (2.0 * 3.14159265358979323846 * v->freq) / (double)POMO_AUDIO_RATE;
+                if (v->phase > 6.28318530717958647692 * 1000.0) {
+                    v->phase -= 6.28318530717958647692 * 1000.0;
+                }
+                v->age++;
+                if (v->age >= v->max_len) v->active = false;
+            }
+
+            float ol, or_;
+            rg35_sf2_fx_sample(&g_sf2, in_l, in_r, &ol, &or_);
+            int32_t sl = (int32_t)(ol * 31500.0f);
+            int32_t sr = (int32_t)(or_ * 31500.0f);
+            if (sl >  32767) sl =  32767; else if (sl < -32767) sl = -32767;
+            if (sr >  32767) sr =  32767; else if (sr < -32767) sr = -32767;
+            out[(pos + i) * 2 + 0] = (int16_t)sl;
+            out[(pos + i) * 2 + 1] = (int16_t)sr;
+        }
+
+        for (int i = 0; i < MAX_CHIME_EVENTS; i++) {
+            ChimeEvent *ev = &g_chimes[i];
+            if (!ev->active) continue;
+            if (!ev->fired) ev->delay_samples -= chunk;
+            else            ev->gate_samples  -= chunk;
+        }
+
+        g_tail_samples_rem -= chunk;
+        if (g_tail_samples_rem < 0) g_tail_samples_rem = 0;
+        pos += chunk;
+    }
+
+    pthread_mutex_unlock(&g_audio_mutex);
+}
+
+static void trigger_beep(bool is_work_done) {
+    /* Work done: ascending C5 -> G5 -> C6 chime; Break done: warm G5 -> E5 -> C6 chime */
+    static const int   k_work_notes[3]  = { 72, 79, 84 };
+    static const int   k_break_notes[3] = { 79, 76, 84 };
+    static const float k_vels[3]        = { 0.86f, 0.82f, 0.92f };
+    static const float k_pans[3]        = { 0.34f, 0.50f, 0.66f };
+    const int *notes = is_work_done ? k_work_notes : k_break_notes;
+    int step_ms = is_work_done ? 300 : 270;
+
+    pthread_mutex_lock(&g_audio_mutex);
+    if (rg35_sf2_ready(&g_sf2)) {
+        rg35_sf2_all_notes_off(&g_sf2);
+    }
+    memset(g_chimes, 0, sizeof(g_chimes));
+    for (int i = 0; i < 3; i++) {
+        g_chimes[i].active        = true;
+        g_chimes[i].fired         = false;
+        g_chimes[i].delay_samples = (POMO_AUDIO_RATE * (i * step_ms)) / 1000;
+        g_chimes[i].gate_samples  = (POMO_AUDIO_RATE * ((i == 2) ? 1400 : 1050)) / 1000;
+        g_chimes[i].midi_note     = notes[i];
+        g_chimes[i].sf2_ch        = i;
+        g_chimes[i].vel           = k_vels[i];
+        g_chimes[i].pan           = k_pans[i];
+    }
+    g_tail_samples_rem = POMO_AUDIO_RATE * 4; /* Full 4.0s decay & reverb tail */
+    pthread_mutex_unlock(&g_audio_mutex);
+
+#if defined(TARGET_RG35XXSP)
+    /* Trigger a brief non-blocking haptic rumble pulse on RG35XXSP (Knulli) if available */
+    if (access("/usr/bin/knulli-rumble", X_OK) == 0) {
+        int rc = system("/usr/bin/knulli-rumble 0.4 >/dev/null 2>&1 &");
+        (void)rc;
+    }
+#endif
+}
+
+#else /* PowKiddy V90 SDL 1.2 minimal fallback */
+
 static volatile int g_beep_samples_remaining = 0;
 static uint32_t g_beep_phase = 0;
 
@@ -971,12 +1423,10 @@ static void audio_callback(void *userdata, Uint8 *stream, int len) {
     int count = len / 2;
     for (int i = 0; i < count; i++) {
         if (g_beep_samples_remaining > 0) {
-            /* Create a pleasant double-beep pattern */
             int16_t val = 0;
             int rem = g_beep_samples_remaining;
             bool tone_on = (rem > 14000) || (rem < 10000 && rem > 2000);
             if (tone_on) {
-                /* 880 Hz square wave with soft amplitude */
                 val = ((g_beep_phase / 25) % 2) ? 3000 : -3000;
                 g_beep_phase++;
             }
@@ -988,16 +1438,12 @@ static void audio_callback(void *userdata, Uint8 *stream, int len) {
     }
 }
 
-static void trigger_beep(void) {
-    g_beep_samples_remaining = 22050; /* ~1 second at 22050 Hz */
-#if defined(TARGET_RG35XXSP)
-    /* Trigger a brief haptic rumble pulse on RG35XXSP (Knulli) if available */
-    if (access("/usr/bin/knulli-rumble", X_OK) == 0) {
-        int rc = system("/usr/bin/knulli-rumble 0.4 >/dev/null 2>&1 &");
-        (void)rc;
-    }
-#endif
+static void trigger_beep(bool is_work_done) {
+    (void)is_work_done;
+    g_beep_samples_remaining = 22050;
 }
+
+#endif /* HOST_X11 || TARGET_RG35XXSP */
 
 static void get_current_date(char *buf, size_t size) {
     time_t now = time(NULL);
@@ -1211,13 +1657,64 @@ static int get_mode_duration(TimerMode mode) {
 
 int main(int argc, char *argv[]) {
     bool dump_promo_mode = false;
+    bool dump_help_mode = false;
+    bool audio_test_mode = false;
     const char *dump_prefix = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dump-promo") == 0 && i + 1 < argc) {
             dump_promo_mode = true;
             dump_prefix = argv[++i];
+        } else if (strcmp(argv[i], "--dump-help") == 0 && i + 1 < argc) {
+            dump_promo_mode = true;
+            dump_help_mode = true;
+            dump_prefix = argv[++i];
+        } else if (strcmp(argv[i], "--audio-test") == 0) {
+            audio_test_mode = true;
         }
     }
+
+#if defined(HOST_X11) || defined(TARGET_RG35XXSP)
+    if (audio_test_mode) {
+        int16_t buf[512 * POMO_AUDIO_CHANNELS];
+        int work_peak = 0, break_peak = 0;
+        double work_sq = 0.0, break_sq = 0.0;
+        int total_samples = 0;
+
+        trigger_beep(true);
+        for (int b = 0; b < 130; b++) {
+            audio_callback(NULL, (Uint8 *)buf, (int)sizeof(buf));
+            for (int i = 0; i < 512 * POMO_AUDIO_CHANNELS; i++) {
+                int v = buf[i] < 0 ? -buf[i] : buf[i];
+                if (v > work_peak) work_peak = v;
+                work_sq += (double)buf[i] * (double)buf[i];
+                total_samples++;
+            }
+        }
+        double work_rms = sqrt(work_sq / (double)(total_samples > 0 ? total_samples : 1));
+
+        total_samples = 0;
+        trigger_beep(false);
+        for (int b = 0; b < 130; b++) {
+            audio_callback(NULL, (Uint8 *)buf, (int)sizeof(buf));
+            for (int i = 0; i < 512 * POMO_AUDIO_CHANNELS; i++) {
+                int v = buf[i] < 0 ? -buf[i] : buf[i];
+                if (v > break_peak) break_peak = v;
+                break_sq += (double)buf[i] * (double)buf[i];
+                total_samples++;
+            }
+        }
+        double break_rms = sqrt(break_sq / (double)(total_samples > 0 ? total_samples : 1));
+
+        printf("pomodoro audio-test: sf2=%s path=%s work_peak=%d work_rms=%.1f break_peak=%d break_rms=%.1f\n",
+               rg35_sf2_ready(&g_sf2) ? "YES" : "NO",
+               rg35_sf2_ready(&g_sf2) ? g_sf2.loaded_path : "dsp-bell-fallback",
+               work_peak, work_rms, break_peak, break_rms);
+        pomodoro_audio_cleanup();
+        return (work_peak > 100 && break_peak > 100) ? 0 : 1;
+    }
+#else
+    (void)audio_test_mode;
+#endif
 
     signal(SIGINT,  handle_quit_signal);
     signal(SIGTERM, handle_quit_signal);
@@ -1241,10 +1738,17 @@ int main(int argc, char *argv[]) {
         if (SDL_InitSubSystem(SDL_INIT_AUDIO) == 0) {
             SDL_AudioSpec desired, obtained;
             memset(&desired, 0, sizeof(desired));
+#if defined(HOST_X11) || defined(TARGET_RG35XXSP)
+            desired.freq = POMO_AUDIO_RATE;
+            desired.format = AUDIO_S16SYS;
+            desired.channels = POMO_AUDIO_CHANNELS;
+            desired.samples = 512;
+#else
             desired.freq = 22050;
             desired.format = AUDIO_S16SYS;
             desired.channels = 1;
             desired.samples = 512;
+#endif
             desired.callback = audio_callback;
             if (SDL_OpenAudio(&desired, &obtained) == 0) {
                 SDL_PauseAudio(0);
@@ -1445,6 +1949,7 @@ int main(int argc, char *argv[]) {
             g_stats.total_pomodoros = 34;
             g_stats.today_pomodoros = 5;
             current_session_work_sec = 6 * 60 + 18;
+            show_help = dump_help_mode;
         }
 
         /* Update Timer */
@@ -1480,7 +1985,7 @@ int main(int argc, char *argv[]) {
                     }
                     save_stats();
                     unsaved_work_sec = 0;
-                    trigger_beep();
+                    trigger_beep(mode == MODE_WORK);
                     break;
                 }
             }
@@ -1620,7 +2125,7 @@ int main(int argc, char *argv[]) {
         char line4[64];
         const char *mode_label = (mode == MODE_WORK) ? "Work" :
                                  (mode == MODE_SHORT_BREAK) ? "Short Break" : "Long Break";
-        snprintf(line4, sizeof(line4), "MODE  : %s (%d min)  [UP/DN/L/R: +/-m]",
+        snprintf(line4, sizeof(line4), "MODE  : %s (%d min) [U/D,L1/R1:+/-1m]",
                  mode_label, total_phase_sec / 60);
         draw_text(screen, 18, 196, line4, 1, col_muted);
 
@@ -1640,22 +2145,37 @@ int main(int argc, char *argv[]) {
 
         /* 6. Help Modal Overlay (toggled with Y) */
         if (show_help) {
-            draw_rect(screen, 14, 18, 292, 204, col_header);
-            draw_border(screen, 14, 18, 292, 204, 2, col_gold);
-            draw_rect(screen, 16, 20, 288, 24, col_panel);
-            draw_text_centered(screen, SCREEN_W / 2, 25, "POMODORO CONTROLS", 2, col_gold);
+            draw_rect(screen, 8, 6, 304, 228, col_header);
+            draw_border(screen, 8, 6, 304, 228, 2, col_gold);
+            draw_rect(screen, 10, 8, 300, 22, col_panel);
+            draw_text_centered(screen, SCREEN_W / 2, 12, "POMODORO - QUICK GUIDE", 2, col_gold);
 
-            draw_text(screen, 26,  54, "A BUTTON      : START / PAUSE TIMER", 1, col_white);
-            draw_text(screen, 26,  70, "B BUTTON      : RESET CURRENT PHASE", 1, col_white);
-            draw_text(screen, 26,  86, "SELECT / L/R  : SWITCH WORK / BREAK", 1, col_break);
-            draw_text(screen, 26, 102, "UP/DN / L1/R1 : DURATION +/- 1 MIN", 1, col_running);
-            draw_text(screen, 26, 118, "L2 / R2       : DURATION +/- 5 MIN", 1, col_running);
-            draw_text(screen, 26, 134, "Y BUTTON      : TOGGLE HELP OVERLAY", 1, col_muted);
-            draw_text(screen, 26, 150, "MENU (ESC)    : SAVE STATS & EXIT", 1, col_work);
+            draw_text_centered(screen, SCREEN_W / 2, 34,
+                               "Focus timer with Work, Short & Long Break", 1, col_white);
+            draw_text_centered(screen, SCREEN_W / 2, 44,
+                               "phases, auto work-hours log & stereo chimes.", 1, col_muted);
+            draw_rect(screen, 16, 55, 288, 1, col_border);
 
-            draw_rect(screen, 26, 184, 268, 24, col_panel);
-            draw_border(screen, 26, 184, 268, 24, 1, col_border);
-            draw_text_centered(screen, SCREEN_W / 2, 193, "PRESS Y, A, OR B TO CLOSE", 1, col_gold);
+            draw_text(screen, 20,  62, "A BUTTON    : Start / Pause (or Next Phase)", 1, col_white);
+            draw_text(screen, 20,  76, "B BUTTON    : Reset current phase timer", 1, col_white);
+            draw_text(screen, 20,  90, "SEL / L / R : Switch Work / Short / Long", 1, col_break);
+            draw_text(screen, 20, 104, "U/D, L1/R1  : Adjust duration +/-1m (idle)", 1, col_running);
+            draw_text(screen, 20, 118, "L2 / R2     : Adjust duration +/-5m (idle)", 1, col_running);
+            draw_text(screen, 20, 132, "Y BUTTON    : Toggle this Help guide", 1, col_muted);
+            draw_text(screen, 20, 146, "MENU (ESC)  : Save work log & exit", 1, col_work);
+
+            draw_rect(screen, 16, 162, 288, 42, col_panel);
+            draw_border(screen, 16, 162, 288, 42, 1, col_border);
+            draw_text_centered(screen, SCREEN_W / 2, 167,
+                               "TIP: Work hours auto-save every 30s, on", 1, col_gold);
+            draw_text_centered(screen, SCREEN_W / 2, 179,
+                               "pause/exit & when closing the SP lid.", 1, col_white);
+            draw_text_centered(screen, SCREEN_W / 2, 191,
+                               "Every 4th focus block queues Long Break.", 1, col_muted);
+
+            draw_rect(screen, 16, 210, 288, 18, col_panel);
+            draw_border(screen, 16, 210, 288, 18, 1, col_gold);
+            draw_text_centered(screen, SCREEN_W / 2, 216, "PRESS Y OR B TO CLOSE", 1, col_gold);
         }
 
         if (dump_promo_mode && dump_prefix) {

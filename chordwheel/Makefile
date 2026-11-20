@@ -30,9 +30,11 @@ TARGET      = chordwheel
 HOST_TARGET = chordwheel_linux
 SRCS        = chordwheel.c
 
-.PHONY: all rg35xxsp linux linux-x64 x64 host run-linux package clean
+.PHONY: all arm rg35xxsp linux linux-x64 x64 host run-linux package clean
 
 all: $(TARGET) $(HOST_TARGET) package
+
+arm: $(TARGET)
 
 rg35xxsp: $(TARGET)
 
@@ -44,11 +46,11 @@ x64: $(HOST_TARGET)
 
 host: $(HOST_TARGET)
 
-$(TARGET): $(SRCS) chordwheel_font.h
+$(TARGET): $(SRCS) chordwheel_font.h ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
 	$(STRIP) $(TARGET)
 
-$(HOST_TARGET): $(SRCS) chordwheel_font.h
+$(HOST_TARGET): $(SRCS) chordwheel_font.h ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(HOST_CC) $(HOST_CFLAGS) -o $(HOST_TARGET) $(SRCS) $(HOST_LDFLAGS)
 
 run-linux: $(HOST_TARGET)

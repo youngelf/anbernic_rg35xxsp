@@ -1,50 +1,50 @@
-# Anbernic RG35XX SP Pomodoro Timer (Knulli Scarab / Batocera & Linux Desktop)
+# Anbernic RG 35xxSP Pomodoro Timer (`640x480`)
 
-A Pomodoro work timer and work-hours tracker built from the unified `pomodoro.c` source for the **Anbernic RG35XX SP** clamshell handheld running **Knulli (Scarab / Batocera)** (Allwinner H700 `aarch64`, **640×480** IPS display), plus a native **x86_64 Linux (X11)** target for desktop testing.
+A distraction-free Pomodoro focus timer and persistent work-hours tracker built from `pomodoro.c` for the **Anbernic RG 35xxSP** clamshell handheld running **Knulli (Scarab / Batocera)** (Allwinner H700 `aarch64`, **640x480** IPS display), plus a native **x86_64 Linux (X11)** target for desktop testing.
 
-![Pomodoro Timer Screenshot](promo/pomodoro_grab.png)
+| Active Focus Session | Quick Guide & Controls (`Y`) |
+| :---: | :---: |
+| ![Pomodoro Timer Screenshot](promo/pomodoro_grab.png) | ![Pomodoro Help Overlay](promo/pomodoro_help.png) |
 
 ## Features
-- **Native 640×480 Display**: Crisp 2× scaled UI (**640×480** 32-bit ARGB) rendered via Knulli's `libSDL2-2.0.so.0` (with automatic fallback to `/dev/fb0`).
-- **Clear Status Header**: Displays `"WORKING: DO NOT DISTURB"` centered in red when in Work mode, plus clear banners for Short Break, Long Break, Paused, and Completed states.
-- **Persistent Work Hours Tracking**: Tracks lifetime hours worked (`WORKED: X.XX HRS` and exact `Xh YYm ZZs`), completed Pomodoros, today's hours, and current session time. Auto-saves every 30 seconds while working, on pause/stop/exit, and immediately when closing the RG35XX SP clamshell lid:
-  - **On RG35XX SP (Knulli)**: Saves to `/userdata/roms/ports/pomodoro/.pomodoro_stats.cfg` and `/userdata/roms/ports/pomodoro/pomodoro_work_log.txt`.
+- **Native 640x480 Display**: Crisp 2x scaled UI (**640x480** 32-bit ARGB) rendered via Knulli's `libSDL2-2.0.so.0` (with automatic fallback to `/dev/fb0`).
+- **Clear Status Header**: Displays `"WORKING: DO NOT DISTURB"` in red during Focus blocks, plus clear banners for Short Break, Long Break, Paused, and Completed states. Every 4th completed focus block automatically queues a Long Break when you press **A**.
+- **Stereo SoundFont & Singing-Bowl Chimes + Haptic Alert**: Plays a warm 44.1 kHz stereo 3-note arpeggio chime on the background audio thread using SoundFont 2 (`GeneralUser-GS.sf2` / `pocketband.sf2` Vibraphone + Tubular Bells with room reverb, plus a multi-harmonic singing-bowl DSP fallback) and triggers a brief vibration pulse via `/usr/bin/knulli-rumble` on Knulli.
+- **Persistent Work Hours Tracking & Lid-Close Save**: Tracks lifetime hours worked (`WORKED: X.XX HRS` and exact `Xh YYm ZZs`), completed Pomodoros, today's hours, and current session time. Auto-saves every 30 seconds while working, on pause/reset/exit, and immediately when closing the RG 35xxSP clamshell lid:
+  - **On RG 35xxSP (Knulli)**: Saves to `/userdata/roms/ports/pomodoro/.pomodoro_stats.cfg` and `/userdata/roms/ports/pomodoro/pomodoro_work_log.txt`.
   - **On Linux Desktop**: Saves to `~/.pomodoro_stats.cfg` and `~/pomodoro_work_log.txt`.
-- **Audio & Haptic Completion Alert**: Plays a double-beep completion tone via SDL2 audio and triggers a brief vibration pulse via `/usr/bin/knulli-rumble` when a timer completes.
 
 ---
 
-## Controls (Anbernic RG35XX SP & Linux Desktop)
+## Controls (Anbernic RG 35xxSP & Linux Desktop)
 
-| Action | Anbernic RG35XX SP Button | Linux Desktop Key |
+| Action | Anbernic RG 35xxSP Button | Linux Desktop Key (`pomodoro_linux`) |
 | :--- | :--- | :--- |
-| **Toggle Start / Stop (Pause)** | **A Button** | `A`, `Space`, or `Left Alt` |
-| **Switch Mode** (`Work` / `Short Break` / `Long Break`) | **SELECT** or **D-Pad LEFT / RIGHT** | `Tab`, `Backspace`, or `Left` / `Right Arrow` |
-| **Reset Current Timer** | **X Button** | `X` or `R` |
-| **Stop / Pause Timer** | **B Button** | `B` or `Left Ctrl` |
-| **Adjust Duration (±1 min while stopped)** | **D-Pad UP / DOWN** or **R1 / L1** | `Up` / `Down Arrow` or `]` / `[` |
-| **Fast Adjust Duration (±5 min while stopped)** | **R2 / L2** | `Page Down` / `Page Up` |
-| **Save & Exit to Knulli** | **MENU (`M`)** | `Q`, `Esc`, or close window |
+| **Start / Pause Timer (or Advance Phase when Done)** | **A** | `A`, `Space`, `Z`, or `Alt` |
+| **Reset Current Phase Timer** | **B** | `B`, `Backspace`, or `Ctrl` |
+| **Switch Phase (`Work` <-> `Short Break` <-> `Long Break`)** | **SELECT** or **D-Pad LEFT / RIGHT** | `Tab` or `Left` / `Right Arrow` |
+| **Adjust Phase Duration (`+/-1 min` while stopped)** | **D-Pad UP / DOWN** or **R1 / L1** | `Up` / `Down Arrow` or `R`/`E`/`]`/`PgDn` and `L`/`Q`/`[`/`PgUp` |
+| **Fast Adjust Phase Duration (`+/-5 min` while stopped)** | **R2 / L2** | `2` / `1` |
+| **Toggle Quick Guide & Controls Overlay** | **Y** | `Y` |
+| **Save Work Log & Exit** | **MENU (`M`)** | `Esc` (or close window) |
 
 ---
 
-## Copying to Your Anbernic RG35XX SP (Knulli SD Card)
+## Copying to Your Anbernic RG 35xxSP (Knulli SD Card)
 
-Run `make` (or `make package`) to generate the ready-to-copy `sdcard_package/` folder:
+Run `make all` to build both binaries and populate `sdcard_package/`:
 ```bash
 cd pomodoro
-make
+make all
 ```
 
-Copy the contents of `sdcard_package/roms/ports/` to the **`roms/ports/`** directory on your Knulli SD card (`SHARE` / `/userdata` partition):
-- `sdcard_package/roms/ports/Pomodoro.sh` -> `/userdata/roms/ports/Pomodoro.sh` (or `roms/ports/Pomodoro.sh` on the SD card)
-- `sdcard_package/roms/ports/pomodoro/` -> `/userdata/roms/ports/pomodoro/` (or `roms/ports/pomodoro/` on the SD card)
+Copy the contents of `sdcard_package/roms/ports/` to `/userdata/roms/ports/` on your Knulli SD card:
+- `sdcard_package/roms/ports/Pomodoro.sh` -> `/userdata/roms/ports/Pomodoro.sh`
+- `sdcard_package/roms/ports/pomodoro/` -> `/userdata/roms/ports/pomodoro/`
 
-```bash
-cp -r sdcard_package/roms/ports/* /path/to/sdcard/roms/ports/
-```
+For upgraded Vibraphone + Tubular Bell completion chimes, copy `../soundfonts/GeneralUser-GS.sf2` to `/userdata/roms/ports/soundfonts/GeneralUser-GS.sf2`.
 
-Then in Knulli (EmulationStation), press **START -> Game Settings -> Update Games Lists**, open the **Ports** section, and launch **Pomodoro**.
+Then in Knulli (EmulationStation), press **START -> Game Settings -> Update Games Lists**, open **Ports**, and launch **Pomodoro**.
 
 ---
 

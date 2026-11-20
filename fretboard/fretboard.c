@@ -88,6 +88,9 @@ static uint32_t g_fb[NATIVE_W * NATIVE_H];
 #undef BTN_QUIT
 #define BTN_QUIT    (1u << 20)
 
+#define RG35XXSP_SF2_IMPLEMENTATION
+#include "../rg35xxsp_sf2.h"
+
 /* ============================================================================
  * 3. MUSIC THEORY DATABASE: NOTES, TUNINGS, 14 SCALES & 12 CHORD QUALITIES
  * ============================================================================ */
@@ -191,7 +194,7 @@ typedef enum {
 } GuitarTimbre;
 
 #define MAX_DELAY_LEN   1024
-#define MAX_SCHED_PLUCK 36
+#define MAX_SCHED_PLUCK 48
 #define CMD_RING_SIZE   16
 
 typedef struct {
@@ -202,8 +205,9 @@ typedef struct {
 } PluckSpec;
 
 typedef struct {
-    int count;
-    int timbre;
+    int  count;
+    int  timbre;
+    bool is_scale_run;
     PluckSpec notes[MAX_SCHED_PLUCK];
 } PluckBatchCmd;
 
@@ -222,9 +226,14 @@ typedef struct {
     float ap_coeff;
     float ap_x1;
     float ap_y1;
+    float disp_coeff;
+    float disp_x1;
+    float disp_y1;
     float lp_prev;
     float pan_l;
     float pan_r;
+    float last_out;
+    float declick_sample;
     bool  overdrive;
 } EksStringVoice;
 
@@ -235,7 +244,14 @@ typedef struct {
     int  fret;
     int  midi_note;
     int  timbre;
+    bool is_scale_run;
 } ScheduledEvent;
+
+typedef struct {
+    bool active;
+    int  key;
+    int  rem_samples;
+} Sf2StringGate;
 
 typedef struct {
     float b0, b1, b2, a1, a2;
@@ -244,13 +260,19 @@ typedef struct {
 
 static EksStringVoice g_voices[NUM_STRINGS];
 static ScheduledEvent g_sched[MAX_SCHED_PLUCK];
+static Sf2StringGate  g_sf2_gates[NUM_STRINGS];
+static Rg35Sf2Engine  g_sf2;
+static bool           g_sf2_init_attempted = false;
+static int            g_sf2_active_timbre  = -1;
+static int            g_audio_timbre       = TIMBRE_ACOUSTIC;
 static uint32_t       g_prng_state = 0x9E3779B9u;
 static BiquadFilter   g_body_air;
 static BiquadFilter   g_body_top;
 static bool           g_dsp_inited = false;
 
 #define CHORUS_BUF_LEN 2048
-static float          g_chorus_buf[CHORUS_BUF_LEN];
+static float          g_chorus_buf_l[CHORUS_BUF_LEN];
+static float          g_chorus_buf_r[CHORUS_BUF_LEN];
 static int            g_chorus_pos = 0;
 static float          g_chorus_lfo = 0.0f;
 
@@ -296,45 +318,121 @@ static void init_dsp_filters(void) {
     g_dsp_inited = true;
 }
 
+static void sf2_configure_timbre(int timbre) {
+    if (!rg35_sf2_ready(&g_sf2)) return;
+    int pref1 = 25, pref2 = 24;
+    if (timbre == TIMBRE_ACOUSTIC) {
+        pref1 = 25; pref2 = 24; /* Steel Acoustic Guitar */
+    } else if (timbre == TIMBRE_CHORUS_EL) {
+        pref1 = 27; pref2 = 26; /* Clean Electric Guitar */
+    } else {
+        pref1 = 29; pref2 = 30; /* Overdrive -> Distortion fallback */
+    }
+    int idx = tsf_get_presetindex(g_sf2.synth, 0, pref1);
+    if (idx < 0) idx = tsf_get_presetindex(g_sf2.synth, 0, pref2);
+    if (idx < 0) idx = tsf_get_presetindex(g_sf2.synth, 0, 27);
+    if (idx < 0) idx = 0;
+
+    static const float k_sf2_pan[6] = { 0.26f, 0.35f, 0.45f, 0.55f, 0.65f, 0.74f };
+    for (int s = 0; s < NUM_STRINGS; s++) {
+        tsf_channel_set_presetindex(g_sf2.synth, s, idx);
+        rg35_sf2_set_channel_pan_vol(&g_sf2, s, k_sf2_pan[s], 0.90f);
+    }
+    g_sf2_active_timbre = timbre;
+}
+
+static void init_sf2_in_audio_thread(void) {
+    if (g_sf2_init_attempted) return;
+    g_sf2_init_attempted = true;
+    init_dsp_filters();
+    if (rg35_sf2_init(&g_sf2, SAMPLE_RATE, 48, 0.20f, 1.30f)) {
+        g_sf2_active_timbre = -1;
+        sf2_configure_timbre(g_audio_timbre);
+    }
+}
+
+static void sf2_pluck_string(int str_idx, int fret, int midi_note, int timbre, bool is_scale_run) {
+    if (str_idx < 0 || str_idx >= NUM_STRINGS || !rg35_sf2_ready(&g_sf2)) return;
+    if (g_sf2_active_timbre != timbre) {
+        sf2_configure_timbre(timbre);
+    }
+    if (is_scale_run) {
+        /* Clean articulate single-note scale runs: release prior scale note smoothly */
+        for (int s = 0; s < NUM_STRINGS; s++) {
+            if (g_sf2_gates[s].active) {
+                rg35_sf2_note_off(&g_sf2, s, g_sf2_gates[s].key);
+                g_sf2_gates[s].active = false;
+            }
+        }
+    } else if (g_sf2_gates[str_idx].active) {
+        rg35_sf2_note_off(&g_sf2, str_idx, g_sf2_gates[str_idx].key);
+    }
+
+    float vel = is_scale_run ? 0.88f : (0.86f - (float)str_idx * 0.02f);
+    rg35_sf2_note_on(&g_sf2, str_idx, midi_note, vel);
+    g_sf2_gates[str_idx].active = true;
+    g_sf2_gates[str_idx].key = midi_note;
+    g_sf2_gates[str_idx].rem_samples = is_scale_run ? ((SAMPLE_RATE * 340) / 1000)
+                                                    : ((SAMPLE_RATE * 2400) / 1000);
+
+    g_string_env[str_idx] = 1.0f;
+    g_active_play_str     = str_idx;
+    g_active_play_fret    = fret;
+    g_active_play_ttl     = SAMPLE_RATE / 4;
+}
+
 static void excite_string_in_audio_thread(int str_idx, int fret, int midi_note, int timbre) {
     if (str_idx < 0 || str_idx >= NUM_STRINGS) return;
     float freq = midi_to_freq(midi_note);
     float exact_period = (float)SAMPLE_RATE / freq;
-    int dlen = (int)floorf(exact_period - 0.5f);
+
+    float disp_a = -0.24f + (float)str_idx * 0.02f;
+    float disp_delay = (1.0f + disp_a) / (1.0f - disp_a);
+    float comp_period = exact_period - 0.5f - disp_delay;
+    int dlen = (int)floorf(comp_period);
     if (dlen < 12) dlen = 12;
     if (dlen >= MAX_DELAY_LEN - 4) dlen = MAX_DELAY_LEN - 4;
 
-    float frac = exact_period - 0.5f - (float)dlen;
+    float frac = comp_period - (float)dlen;
     if (frac < 0.05f) frac = 0.05f;
     if (frac > 0.95f) frac = 0.95f;
 
     EksStringVoice *v = &g_voices[str_idx];
+    if (v->active) {
+        v->declick_sample += v->last_out;
+        v->last_out = 0.0f;
+    }
     v->active       = false;
     v->delay_len    = dlen;
     v->pos          = 0;
-    v->samples_left = (SAMPLE_RATE * 22) / 10;
+    v->samples_left = (SAMPLE_RATE * 24) / 10;
     v->ap_coeff     = (1.0f - frac) / (1.0f + frac);
     v->ap_x1        = 0.0f;
     v->ap_y1        = 0.0f;
+    v->disp_coeff   = disp_a;
+    v->disp_x1      = 0.0f;
+    v->disp_y1      = 0.0f;
     v->lp_prev      = 0.0f;
     v->overdrive    = (timbre == TIMBRE_OVERDRIVE);
 
-    float pan = ((float)str_idx / 5.0f) * 0.48f - 0.24f;
-    v->pan_l  = 0.707f * (1.0f - pan);
-    v->pan_r  = 0.707f * (1.0f + pan);
+    /* Constant-power stereo string panning across 6 strings */
+    double norm = ((double)str_idx / 5.0) * 2.0 - 1.0;
+    double angle = (M_PI * 0.25) + norm * 0.34;
+    v->pan_l = (float)cos(angle);
+    v->pan_r = (float)sin(angle);
 
     if (timbre == TIMBRE_OVERDRIVE) {
-        v->damping = (str_idx < 3) ? 0.9972f : 0.9962f;
-        v->stretch = 0.62f;
+        v->damping = (str_idx < 3) ? 0.9974f : 0.9964f;
+        v->stretch = 0.58f;
     } else if (timbre == TIMBRE_CHORUS_EL) {
-        v->damping = (str_idx < 3) ? 0.9965f : 0.9950f;
-        v->stretch = 0.56f;
+        v->damping = (str_idx < 3) ? 0.9968f : 0.9954f;
+        v->stretch = 0.52f;
     } else {
-        v->damping = (str_idx < 3) ? 0.9955f : 0.9935f;
-        v->stretch = 0.48f;
+        v->damping = (str_idx < 3) ? 0.9960f : 0.9942f;
+        v->stretch = 0.44f;
     }
 
-    int pick_offset = (dlen * 22) / 100;
+    int pick_offset = (dlen * 20) / 100;
     if (pick_offset < 2) pick_offset = 2;
 
     float raw[MAX_DELAY_LEN];
@@ -343,18 +441,18 @@ static void excite_string_in_audio_thread(int str_idx, int fret, int midi_note, 
 
     for (int i = 0; i < dlen; i++) {
         float ph = (2.0f * (float)M_PI * (float)i) / (float)dlen;
-        float body = 0.44f * sinf(ph)
-                   + 0.22f * sinf(2.0f * ph)
-                   + 0.11f * sinf(3.0f * ph);
+        float body = 0.46f * sinf(ph)
+                   + 0.24f * sinf(2.0f * ph + 0.3f)
+                   + 0.12f * sinf(3.0f * ph + 0.8f);
         float n = rand_bipolar();
         lp = lp + alpha * (n - lp);
-        raw[i] = body + lp * 0.55f;
+        raw[i] = body + lp * 0.52f;
     }
 
     float mean = 0.0f;
     for (int i = 0; i < dlen; i++) {
         int j = (i + dlen - pick_offset) % dlen;
-        v->delay_line[i] = (raw[i] - 0.55f * raw[j]) * 0.75f;
+        v->delay_line[i] = (raw[i] - 0.52f * raw[j]) * 0.78f;
         mean += v->delay_line[i];
     }
     mean /= (float)dlen;
@@ -378,20 +476,34 @@ static void post_pluck_batch(const PluckBatchCmd *cmd) {
 
 static void audio_callback(void *userdata, uint8_t *stream, int len) {
     (void)userdata;
-    init_dsp_filters();
+    init_sf2_in_audio_thread();
 
     int16_t *out = (int16_t *)stream;
     int frames = len / (2 * AUDIO_CHANNELS);
-    bool any_overdrive = false;
+    if (frames <= 0) return;
 
     while (g_cmd_read_idx != g_cmd_write_idx) {
         PluckBatchCmd cmd = g_cmd_ring[g_cmd_read_idx & (CMD_RING_SIZE - 1)];
         __sync_synchronize();
         g_cmd_read_idx++;
 
+        g_audio_timbre = cmd.timbre;
         for (int i = 0; i < MAX_SCHED_PLUCK; i++) g_sched[i].pending = false;
-        for (int s = 0; s < NUM_STRINGS; s++)     g_voices[s].active = false;
         g_active_play_ttl = 0;
+
+        if (rg35_sf2_ready(&g_sf2)) {
+            rg35_sf2_all_notes_off(&g_sf2);
+            memset(g_sf2_gates, 0, sizeof(g_sf2_gates));
+            if (g_sf2_active_timbre != cmd.timbre) {
+                sf2_configure_timbre(cmd.timbre);
+            }
+        } else {
+            for (int s = 0; s < NUM_STRINGS; s++) {
+                if (g_voices[s].active) g_voices[s].declick_sample += g_voices[s].last_out;
+                g_voices[s].active = false;
+                g_voices[s].last_out = 0.0f;
+            }
+        }
 
         for (int n = 0; n < cmd.count && n < MAX_SCHED_PLUCK; n++) {
             g_sched[n].pending       = true;
@@ -400,9 +512,98 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
             g_sched[n].fret          = cmd.notes[n].fret;
             g_sched[n].midi_note     = cmd.notes[n].midi_note;
             g_sched[n].timbre        = cmd.timbre;
+            g_sched[n].is_scale_run  = cmd.is_scale_run;
         }
     }
 
+    if (rg35_sf2_ready(&g_sf2)) {
+        float raw_stereo[1024 * 2];
+        int pos = 0;
+        while (pos < frames) {
+            int rem = frames - pos;
+            if (rem > 1024) rem = 1024;
+
+            int next_ev = rem;
+            for (int i = 0; i < MAX_SCHED_PLUCK; i++) {
+                if (g_sched[i].pending && g_sched[i].delay_samples < next_ev) {
+                    next_ev = g_sched[i].delay_samples;
+                }
+            }
+            for (int s = 0; s < NUM_STRINGS; s++) {
+                if (g_sf2_gates[s].active && g_sf2_gates[s].rem_samples < next_ev) {
+                    next_ev = g_sf2_gates[s].rem_samples;
+                }
+            }
+            if (next_ev <= 0) {
+                for (int i = 0; i < MAX_SCHED_PLUCK; i++) {
+                    if (g_sched[i].pending && g_sched[i].delay_samples <= 0) {
+                        g_sched[i].pending = false;
+                        sf2_pluck_string(g_sched[i].str_idx, g_sched[i].fret,
+                                         g_sched[i].midi_note, g_sched[i].timbre,
+                                         g_sched[i].is_scale_run);
+                    }
+                }
+                for (int s = 0; s < NUM_STRINGS; s++) {
+                    if (g_sf2_gates[s].active && g_sf2_gates[s].rem_samples <= 0) {
+                        g_sf2_gates[s].active = false;
+                        rg35_sf2_note_off(&g_sf2, s, g_sf2_gates[s].key);
+                    }
+                }
+                next_ev = 1;
+            }
+            int chunk = (next_ev < rem) ? next_ev : rem;
+            for (int i = 0; i < MAX_SCHED_PLUCK; i++) {
+                if (g_sched[i].pending) g_sched[i].delay_samples -= chunk;
+            }
+            for (int s = 0; s < NUM_STRINGS; s++) {
+                if (g_sf2_gates[s].active) g_sf2_gates[s].rem_samples -= chunk;
+            }
+            if (g_active_play_ttl > 0) {
+                g_active_play_ttl -= chunk;
+                if (g_active_play_ttl <= 0) {
+                    g_active_play_ttl = 0;
+                    g_active_play_str = -1;
+                    g_active_play_fret = -1;
+                }
+            }
+
+            tsf_render_float(g_sf2.synth, raw_stereo, chunk, 0);
+            for (int i = 0; i < chunk; i++) {
+                float in_l = raw_stereo[i * 2];
+                float in_r = raw_stereo[i * 2 + 1];
+
+                if (g_audio_timbre == TIMBRE_CHORUS_EL) {
+                    g_chorus_buf_l[g_chorus_pos] = in_l;
+                    g_chorus_buf_r[g_chorus_pos] = in_r;
+                    g_chorus_lfo += 2.0f * (float)M_PI * 0.85f / (float)SAMPLE_RATE;
+                    if (g_chorus_lfo > 2.0f * (float)M_PI) g_chorus_lfo -= 2.0f * (float)M_PI;
+                    int d_l = (int)(300.0f + 85.0f * sinf(g_chorus_lfo));
+                    int d_r = (int)(340.0f + 85.0f * cosf(g_chorus_lfo));
+                    in_l = in_l * 0.78f + 0.32f * g_chorus_buf_l[(g_chorus_pos - d_l + CHORUS_BUF_LEN) & (CHORUS_BUF_LEN - 1)];
+                    in_r = in_r * 0.78f + 0.32f * g_chorus_buf_r[(g_chorus_pos - d_r + CHORUS_BUF_LEN) & (CHORUS_BUF_LEN - 1)];
+                    g_chorus_pos = (g_chorus_pos + 1) & (CHORUS_BUF_LEN - 1);
+                }
+
+                float ol, or_;
+                rg35_sf2_fx_sample(&g_sf2, in_l, in_r, &ol, &or_);
+                int32_t sl = (int32_t)(ol * 31500.0f);
+                int32_t sr = (int32_t)(or_ * 31500.0f);
+                if (sl >  32767) sl =  32767; else if (sl < -32767) sl = -32767;
+                if (sr >  32767) sr =  32767; else if (sr < -32767) sr = -32767;
+                out[(pos + i) * 2 + 0] = (int16_t)sl;
+                out[(pos + i) * 2 + 1] = (int16_t)sr;
+            }
+            pos += chunk;
+        }
+        for (int s = 0; s < NUM_STRINGS; s++) {
+            float e = g_string_env[s] * 0.86f;
+            g_string_env[s] = (e < 0.005f) ? 0.0f : e;
+        }
+        return;
+    }
+
+    /* Fallback: Upgraded EKS Physical Model + All-Pass Dispersion + Stereo Room Reverb */
+    bool any_overdrive = (g_audio_timbre == TIMBRE_OVERDRIVE);
     for (int i = 0; i < frames; i++) {
         for (int s = 0; s < MAX_SCHED_PLUCK; s++) {
             if (g_sched[s].pending) {
@@ -432,9 +633,18 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
 
         for (int s = 0; s < NUM_STRINGS; s++) {
             EksStringVoice *sv = &g_voices[s];
+            if (sv->declick_sample != 0.0f) {
+                float dc = sv->declick_sample;
+                mix_l += dc * sv->pan_l;
+                mix_r += dc * sv->pan_r;
+                mono_sum += dc;
+                sv->declick_sample = dc * 0.985f;
+                if (fabsf(sv->declick_sample) < 1e-6f) sv->declick_sample = 0.0f;
+            }
             if (!sv->active) continue;
             if (sv->samples_left <= 0) {
                 sv->active = false;
+                sv->last_out = 0.0f;
                 continue;
             }
             sv->samples_left--;
@@ -453,15 +663,27 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
             sv->ap_x1 = damped;
             sv->ap_y1 = ap_out;
 
-            sv->delay_line[p0] = ap_out;
+            /* 1st-order all-pass inharmonicity dispersion filter */
+            float disp_out = sv->disp_coeff * ap_out + sv->disp_x1 - sv->disp_coeff * sv->disp_y1;
+            if (fabsf(disp_out) < 1e-9f) disp_out = 0.0f;
+            sv->disp_x1 = ap_out;
+            sv->disp_y1 = disp_out;
+
+            sv->delay_line[p0] = disp_out;
             sv->pos = p1;
 
-            float sig = s0;
+            float env = 1.0f;
+            int rel_len = (SAMPLE_RATE * 240) / 1000;
+            if (sv->samples_left < rel_len) {
+                env = 0.5f * (1.0f - cosf((float)M_PI * (float)sv->samples_left / (float)rel_len));
+            }
+            float sig = s0 * env;
             if (sv->overdrive) {
                 float x = sig * 2.4f;
                 sig = x / (1.0f + 0.65f * fabsf(x));
             }
 
+            sv->last_out = sig;
             mix_l    += sig * sv->pan_l;
             mix_r    += sig * sv->pan_r;
             mono_sum += sig;
@@ -474,34 +696,30 @@ static void audio_callback(void *userdata, uint8_t *stream, int len) {
             }
         }
 
-        float body = biquad_process(&g_body_top, biquad_process(&g_body_air, mono_sum * 0.35f));
-        mix_l += body * 0.42f;
-        mix_r += body * 0.42f;
+        float body = biquad_process(&g_body_top, biquad_process(&g_body_air, mono_sum * 0.32f));
+        mix_l = mix_l * 0.62f + body * (any_overdrive ? 0.14f : 0.26f);
+        mix_r = mix_r * 0.62f + body * (any_overdrive ? 0.14f : 0.26f);
 
-        g_chorus_buf[g_chorus_pos] = mono_sum * 0.45f;
-        g_chorus_lfo += 2.0f * (float)M_PI * 1.15f / (float)SAMPLE_RATE;
-        if (g_chorus_lfo > 2.0f * (float)M_PI) g_chorus_lfo -= 2.0f * (float)M_PI;
+        if (g_audio_timbre == TIMBRE_CHORUS_EL) {
+            g_chorus_buf_l[g_chorus_pos] = mix_l;
+            g_chorus_buf_r[g_chorus_pos] = mix_r;
+            g_chorus_lfo += 2.0f * (float)M_PI * 1.05f / (float)SAMPLE_RATE;
+            if (g_chorus_lfo > 2.0f * (float)M_PI) g_chorus_lfo -= 2.0f * (float)M_PI;
+            int idx_l = (g_chorus_pos + CHORUS_BUF_LEN - (int)(260.0f + 70.0f * sinf(g_chorus_lfo))) & (CHORUS_BUF_LEN - 1);
+            int idx_r = (g_chorus_pos + CHORUS_BUF_LEN - (int)(300.0f + 70.0f * cosf(g_chorus_lfo))) & (CHORUS_BUF_LEN - 1);
+            mix_l += g_chorus_buf_l[idx_l] * 0.30f;
+            mix_r += g_chorus_buf_r[idx_r] * 0.30f;
+            g_chorus_pos = (g_chorus_pos + 1) & (CHORUS_BUF_LEN - 1);
+        }
 
-        float d_l = 240.0f + 50.0f * sinf(g_chorus_lfo);
-        float d_r = 280.0f + 50.0f * cosf(g_chorus_lfo);
-        int idx_l = (g_chorus_pos + CHORUS_BUF_LEN - (int)d_l) & (CHORUS_BUF_LEN - 1);
-        int idx_r = (g_chorus_pos + CHORUS_BUF_LEN - (int)d_r) & (CHORUS_BUF_LEN - 1);
-        float wet = any_overdrive ? 0.20f : 0.25f;
-        mix_l += g_chorus_buf[idx_l] * wet;
-        mix_r -= g_chorus_buf[idx_r] * wet;
-        g_chorus_pos = (g_chorus_pos + 1) & (CHORUS_BUF_LEN - 1);
-
-        float out_l = mix_l * 13500.0f;
-        float out_r = mix_r * 13500.0f;
-        if (out_l >  32700.0f) out_l =  32700.0f;
-        if (out_l < -32700.0f) out_l = -32700.0f;
-        if (out_r >  32700.0f) out_r =  32700.0f;
-        if (out_r < -32700.0f) out_r = -32700.0f;
-
-        int16_t sl = (int16_t)out_l;
-        int16_t sr = (int16_t)out_r;
-        out[i * 2 + 0] = sl;
-        out[i * 2 + 1] = sr;
+        float ol, or_;
+        rg35_sf2_fx_sample(&g_sf2, mix_l, mix_r, &ol, &or_);
+        int32_t sl = (int32_t)(ol * 31000.0f);
+        int32_t sr = (int32_t)(or_ * 31000.0f);
+        if (sl >  32767) sl =  32767; else if (sl < -32767) sl = -32767;
+        if (sr >  32767) sr =  32767; else if (sr < -32767) sr = -32767;
+        out[i * 2 + 0] = (int16_t)sl;
+        out[i * 2 + 1] = (int16_t)sr;
     }
 }
 
@@ -632,6 +850,7 @@ static void platform_shutdown(void) {
         g_audio_running = false;
         pthread_join(g_audio_thread, NULL);
     }
+    rg35_sf2_free(&g_sf2);
     if (g_x11_img) {
         XDestroyImage(g_x11_img);
         g_x11_img = NULL;
@@ -910,6 +1129,7 @@ static void platform_shutdown(void) {
         if (fn_SDL_Quit)            fn_SDL_Quit();
         dlclose(g_sdl2_lib);
     }
+    rg35_sf2_free(&g_sf2);
     if (g_fb_mem && g_fb_mem != MAP_FAILED) munmap(g_fb_mem, g_fb_len);
     if (g_fb_fd >= 0) close(g_fb_fd);
     for (int i = 0; i < g_num_ev_fds; i++) close(g_ev_fds[i]);
@@ -1399,6 +1619,7 @@ static void audition_current_mode(void) {
         int low_f, high_f;
         compute_caged_box_range(g_root_pc, (g_caged_pos == 0) ? 1 : g_caged_pos, &low_f, &high_f);
 
+        cmd.is_scale_run = true;
         int k = 0;
         int last_midi = -1;
         for (int s = 0; s < NUM_STRINGS; s++) {
@@ -1873,30 +2094,36 @@ static void render_legend_and_footer(void) {
 }
 
 static void render_help_modal(void) {
-    int mx = 20, my = 18, mw = NATIVE_W - 40, mh = NATIVE_H - 36;
+    int mx = 20, my = 12, mw = NATIVE_W - 40, mh = NATIVE_H - 24;
     fill_rect(mx, my, mw, mh, RGB(15, 23, 38));
     draw_border(mx, my, mw, mh, 2, RGB(96, 165, 250));
     draw_border(mx + 3, my + 3, mw - 6, mh - 6, 1, RGB(37, 99, 235));
 
-    fill_rect(mx + 4, my + 4, mw - 8, 40, RGB(28, 39, 60));
-    fill_rect(mx + 4, my + 44, mw - 8, 2, RGB(64, 82, 115));
-    draw_pill(mx + 12, my + 8, 84, 30, RGB(37, 99, 235), RGB(147, 197, 253));
-    draw_text_centered(FONT_UI_13, mx + 12, my + 8, 84, 30, "HELP", RGB(255, 255, 255));
-    draw_text(FONT_UI_20, mx + 108, my + 10, "RG35XXSP FRETBOARD & TUNINGS", RGB(248, 250, 252));
+    fill_rect(mx + 4, my + 4, mw - 8, 38, RGB(28, 39, 60));
+    fill_rect(mx + 4, my + 42, mw - 8, 2, RGB(64, 82, 115));
+    draw_pill(mx + 12, my + 8, 76, 28, RGB(37, 99, 235), RGB(147, 197, 253));
+    draw_text_centered(FONT_UI_13, mx + 12, my + 8, 76, 28, "HELP", RGB(255, 255, 255));
+    draw_text(FONT_UI_20, mx + 98, my + 10, "FRETBOARD - QUICK GUIDE & TUNINGS", RGB(248, 250, 252));
 
-    int gy = my + 54;
-    fill_rect(mx + 14, gy, mw - 28, 72, RGB(23, 33, 52));
-    draw_border(mx + 14, gy, mw - 28, 72, 2, RGB(52, 211, 153));
+    fill_rect(mx + 4, my + 44, mw - 8, 22, RGB(19, 29, 48));
+    fill_rect(mx + 4, my + 66, mw - 8, 1, RGB(48, 66, 98));
+    draw_text_centered(FONT_UI_13, mx + 8, my + 44, mw - 16, 22,
+                       "15-fret CAGED scale visualizer, chord voicing browser & reverse chord finder.",
+                       RGB(186, 230, 253));
+
+    int gy = my + 72;
+    fill_rect(mx + 14, gy, mw - 28, 68, RGB(23, 33, 52));
+    draw_border(mx + 14, gy, mw - 28, 68, 2, RGB(52, 211, 153));
 
     char t1[96];
-    snprintf(t1, sizeof(t1), "[L/R or R2] Tuning (%d/%d): %s",
+    snprintf(t1, sizeof(t1), "[LEFT/RIGHT or R2] Tuning (%d/%d): %s",
              g_tuning_idx + 1, NUM_TUNINGS, k_tunings[g_tuning_idx].name);
-    draw_text_centered(FONT_UI_16, mx + 14, gy + 10, mw - 28, 24, t1, RGB(250, 204, 21));
-    draw_text_centered(FONT_UI_13, mx + 14, gy + 40, mw - 28, 20,
+    draw_text_centered(FONT_UI_16, mx + 14, gy + 8, mw - 28, 24, t1, RGB(250, 204, 21));
+    draw_text_centered(FONT_UI_13, mx + 14, gy + 38, mw - 28, 20,
                        "Tunings: Std E  |  Drop D  |  Eb Std  |  D Std  |  DADGAD  |  Open G",
                        RGB(167, 243, 208));
 
-    int ky = gy + 84;
+    int ky = gy + 78;
     static const struct {
         const char *btn;
         const char *desc;
@@ -1905,20 +2132,21 @@ static void render_help_modal(void) {
         { "A Button",     "Audition Scale Box / Strum Chord Voicing / Pluck Note" },
         { "B Button",     "Scales: Chord Tones | Chords: Full Arp | Explorer: Lock" },
         { "X Button",     "Cycle Dot Labels: Intervals (R,b3) -> Notes -> Degrees" },
-        { "L1 / R1",      "Cycle 5 CAGED Boxes (POS 1..5) or 5 Chord Voicings" },
+        { "L1 / R1",      "CAGED Boxes (POS 1..5), Chord Voicings, or +/-3 Frets" },
         { "L2 / R2",      "L2: Timbre (Acoustic/Chorus/Lead) | R2: Cycle 6 Tunings" },
         { "DPAD / MENU",  "U/D: Root Key | L/R: Scale/Chord | MENU: Save & Exit" }
     };
 
     for (int i = 0; i < 7; i++) {
-        int ry = ky + i * 36;
+        int ry = ky + i * 37;
         draw_pill(mx + 16, ry, 132, 28, RGB(30, 58, 95), RGB(71, 98, 145));
         draw_text_centered(FONT_UI_13, mx + 16, ry, 132, 28, k_rows[i].btn, RGB(254, 240, 138));
         draw_text(FONT_UI_13, mx + 160, ry + 6, k_rows[i].desc, RGB(226, 232, 240));
     }
 
-    fill_rect(mx + 4, my + mh - 32, mw - 8, 28, RGB(12, 18, 30));
-    draw_text_centered(FONT_UI_13, mx, my + mh - 30, mw, 24,
+    fill_rect(mx + 4, my + mh - 34, mw - 8, 30, RGB(12, 18, 30));
+    fill_rect(mx + 4, my + mh - 34, mw - 8, 1, RGB(51, 65, 85));
+    draw_text_centered(FONT_UI_13, mx, my + mh - 32, mw, 26,
                        "Press [Y] or [B] to close Help and return to Fretboard",
                        RGB(186, 230, 253));
 }
@@ -1949,6 +2177,34 @@ int main(int argc, char *argv[]) {
 
     resolve_config_path();
     load_config();
+
+    /* Automated Audio Self-Test (--audio-test) */
+    if (argc >= 2 && strcmp(argv[1], "--audio-test") == 0) {
+        g_mode = MODE_CHORDS;
+        g_root_pc = 0; g_chord_idx = 3; g_voicing_pos = 1;
+        g_timbre = TIMBRE_ACOUSTIC;
+        audition_current_mode();
+        int16_t pcm[512 * AUDIO_CHANNELS];
+        double energy = 0.0;
+        int peak = 0;
+        int total_frames = SAMPLE_RATE / 2;
+        for (int done = 0; done < total_frames; done += 512) {
+            audio_callback(NULL, (uint8_t *)pcm, (int)sizeof(pcm));
+            for (int i = 0; i < 512 * AUDIO_CHANNELS; i++) {
+                int v = pcm[i];
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+                energy += (double)pcm[i] * (double)pcm[i];
+            }
+        }
+        double rms = sqrt(energy / (double)(total_frames * AUDIO_CHANNELS));
+        printf("fretboard audio-test: sf2=%s path=%s peak=%d rms=%.1f\n",
+               rg35_sf2_ready(&g_sf2) ? "YES" : "NO",
+               rg35_sf2_ready(&g_sf2) ? g_sf2.loaded_path : "(fallback-eks)",
+               peak, rms);
+        rg35_sf2_free(&g_sf2);
+        return (peak > 100) ? 0 : 1;
+    }
 
     /* Automated Screenshot State Generator (--screenshot-states <dir>) */
     if (argc >= 3 && strcmp(argv[1], "--screenshot-states") == 0) {

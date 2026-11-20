@@ -38,17 +38,17 @@ x64: $(TARGET_LINUX)
 
 host: $(TARGET_LINUX)
 
-$(TARGET_ARM): $(SRC) pocketband_font.h
+$(TARGET_ARM): $(SRC) pocketband_font.h ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(ARM_CC) $(CFLAGS_COMMON) -mcpu=cortex-a53 -DTARGET_RG35XXSP -D_GNU_SOURCE=1 $(ARM_SYSROOT) -o $@ $(SRC) -lm -lpthread -ldl
 	$(ARM_STRIP) $@
 
-$(TARGET_LINUX): $(SRC) pocketband_font.h
+$(TARGET_LINUX): $(SRC) pocketband_font.h ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(HOST_CC) $(CFLAGS_COMMON) -DHOST_X11 -D_GNU_SOURCE=1 -o $@ $(SRC) -lX11 -lm -lpthread -ldl
 
-package: $(TARGET_ARM) PocketBand.sh pocketband.png
+package: $(TARGET_ARM) PocketBand.sh pocketband.png pocketband.sf2
 	rm -rf $(PACKAGE_DIR)
 	mkdir -p $(PACKAGE_DIR)/roms/ports/pocketband
-	cp $(TARGET_ARM) pocketband.png $(PACKAGE_DIR)/roms/ports/pocketband/
+	cp $(TARGET_ARM) pocketband.png pocketband.sf2 $(PACKAGE_DIR)/roms/ports/pocketband/
 	cp PocketBand.sh $(PACKAGE_DIR)/roms/ports/PocketBand.sh
 	chmod +x $(PACKAGE_DIR)/roms/ports/PocketBand.sh $(PACKAGE_DIR)/roms/ports/pocketband/$(TARGET_ARM)
 

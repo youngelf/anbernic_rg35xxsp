@@ -27,10 +27,12 @@ TARGET = metronome
 HOST_TARGET = metronome_linux
 SRCS = metronome.c
 
-.PHONY: all 35xxsp rg35xxsp linux linux-x64 x64 host run-linux package clean
+.PHONY: all arm 35xxsp rg35xxsp linux linux-x64 x64 host run-linux package clean
 
 # Default builds the Anbernic RG35XX SP (aarch64) binary, Linux x86_64 binary, and SD card package
 all: $(TARGET) $(HOST_TARGET) package
+
+arm: $(TARGET)
 
 35xxsp: $(TARGET)
 
@@ -45,11 +47,11 @@ x64: $(HOST_TARGET)
 
 host: $(HOST_TARGET)
 
-$(TARGET): $(SRCS)
+$(TARGET): $(SRCS) ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(CC) $(CFLAGS) -o $(TARGET) $(SRCS) $(LDFLAGS)
 	$(STRIP) $(TARGET)
 
-$(HOST_TARGET): $(SRCS)
+$(HOST_TARGET): $(SRCS) ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 	$(HOST_CC) $(HOST_CFLAGS) -o $(HOST_TARGET) $(SRCS) $(HOST_LDFLAGS)
 
 run-linux: $(HOST_TARGET)

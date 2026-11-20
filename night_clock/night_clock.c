@@ -11,7 +11,7 @@
  * Features:
  *   - Retains the top-screen clock functionality (no date display):
  *     * 24-Hour Retro LED Dot-Matrix Digital Clock (HH:MM, constant colon, no seconds)
- *     * Minimalist High-Contrast Analog Clock (toggled with SELECT or X)
+ *     * Minimalist High-Contrast Analog Clock (toggled with SELECT)
  *     * 10-Minute IPS Anti-Burn-In Orbit around the 640x480 center
  *   - Local Timezone Shift (D-Pad LEFT / RIGHT in +/-30m steps, displayed as TZ +/-HH:MM,
  *     persisted across reboots in .night_clock.cfg)
@@ -42,6 +42,7 @@
 #include <sys/types.h>
 
 #include "../rg35xxsp_input.h"
+#include "../rg35xxsp_keepawake.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -485,10 +486,12 @@ static int platform_init(const char *title) {
             return -1;
         }
     }
+    rg35xxsp_keepawake_init("night_clock", g_sdl2_lib);
     return 0;
 }
 
 static void platform_present(void) {
+    rg35xxsp_keepawake_tick_now();
     if (g_use_sdl2_video) {
         fn_SDL2_UpdateTexture(g_sdl2_tex, NULL, g_framebuf, NATIVE_W * 4);
         fn_SDL2_RenderClear(g_sdl2_ren);
@@ -574,7 +577,12 @@ static bool platform_poll_input(input_state_t *out) {
             if (ie.type == EV_KEY && (ie.value == 0 || ie.value == 1)) {
                 if (ie.code == KEY_INSERT && ie.value == 1) {
                     /* RG35XXSP Hall sensor lid close: flush config to SD card */
+                    rg35xxsp_keepawake_set_lid_closed(true);
                     save_config();
+                    continue;
+                }
+                if (ie.code == KEY_DELETE && ie.value == 1) {
+                    rg35xxsp_keepawake_set_lid_closed(false);
                     continue;
                 }
                 uint32_t mask = translate_rg35xxsp_evkey(ie.code);
@@ -605,6 +613,7 @@ static bool platform_poll_input(input_state_t *out) {
 }
 
 static void platform_shutdown(void) {
+    rg35xxsp_keepawake_shutdown();
     for (int i = 0; i < g_num_evdevs; i++) {
         if (g_evdevs[i].fd >= 0) close(g_evdevs[i].fd);
     }
@@ -1720,28 +1729,35 @@ static void render_help_screen(void) {
     clear_screen(RGB_COLOR(10, 15, 24));
 
     /* Header */
-    fill_rect(0, 0, NATIVE_W, 44, RGB_COLOR(24, 36, 58));
-    fill_rect(0, 42, NATIVE_W, 2, RGB_COLOR(255, 155, 75));
-    draw_text_centered(15, "NIGHT CLOCK  -  CONTROLS & BUTTON MAPPINGS", 2, RGB_COLOR(255, 185, 110));
+    fill_rect(0, 0, NATIVE_W, 40, RGB_COLOR(24, 36, 58));
+    fill_rect(0, 38, NATIVE_W, 2, RGB_COLOR(255, 155, 75));
+    draw_text_centered(13, "NIGHT CLOCK  -  QUICK GUIDE & CONTROLS", 2, RGB_COLOR(255, 185, 110));
 
-    int table_x = 20, table_y = 52, table_w = NATIVE_W - 40;
+    /* Quick Guide Intro */
+    fill_rect(20, 46, NATIVE_W - 40, 24, RGB_COLOR(16, 25, 42));
+    draw_rect(20, 46, NATIVE_W - 40, 24, 1, RGB_COLOR(52, 76, 116));
+    draw_text_centered(54,
+                       "24H LED & Analog bedside clock with 10-min anti-burn-in orbit & local TZ alarm.",
+                       1, RGB_COLOR(185, 220, 255));
+
+    int table_x = 20, table_y = 76, table_w = NATIVE_W - 40;
     static const struct {
         const char *btn;
         const char *action;
     } k_help_rows[] = {
-        { "D-PAD LEFT / RIGHT", "Shift local timezone (TZ -30m / +30m, saved on boot)" },
-        { "D-PAD UP / DOWN",    "Adjust screen & clock brightness (1..10, hold=repeat)" },
-        { "SELECT / X BUTTON",  "Switch clock mode: Retro LED Digital (24H) / Analog" },
-        { "A BUTTON",           "Open Alarm Set screen; press A again to save & test" },
-        { "B BUTTON",           "Quick-toggle Alarm ON/OFF (Clock) / Cancel (Alarm Set)" },
-        { "Y BUTTON",           "Show Controls / Help screen; press Y again to resume" },
-        { "L1 / R1 (IN ALARM)", "Step alarm minutes by -5 / +5 mins while setting" },
-        { "VOL+ / VOL- (+/-)",  "Adjust volume (0..10) & play confirmation alarm at end" },
+        { "D-PAD LEFT / RIGHT", "Shift app-local timezone (-30m / +30m, auto-saved)" },
+        { "D-PAD UP / DOWN",    "Adjust screen & LED brightness (1..10, hold=repeat)" },
+        { "SELECT BUTTON",      "Switch clock face: Retro LED Digital (24H) / Analog" },
+        { "A BUTTON",           "Open Alarm Set; press A again to save & test alarm" },
+        { "B BUTTON",           "Quick-toggle Alarm ON/OFF (Clock) / Disable (Set)" },
+        { "L1/L2 / R1/R2",      "Step alarm minutes by -5 / +5 mins (in Alarm Set)" },
+        { "VOL+ / VOL- (+/-)",  "Adjust volume (0..10); plays test tone on release" },
+        { "Y BUTTON",           "Toggle this Quick Guide & Controls screen" },
         { "MENU (ESC)",         "Save configuration & exit Night Clock" }
     };
 
     int num_rows = (int)(sizeof(k_help_rows) / sizeof(k_help_rows[0]));
-    int row_h = 38;
+    int row_h = 37;
     for (int i = 0; i < num_rows; i++) {
         int ry = table_y + i * row_h;
         uint32_t row_bg = (i % 2 == 0) ? RGB_COLOR(16, 24, 38) : RGB_COLOR(22, 32, 50);
@@ -1754,9 +1770,9 @@ static void render_help_screen(void) {
     }
 
     /* Footer resume banner */
-    fill_rect(20, 414, NATIVE_W - 40, 50, RGB_COLOR(26, 40, 64));
-    draw_rect(20, 414, NATIVE_W - 40, 50, 2, RGB_COLOR(255, 155, 75));
-    draw_text_centered(432, "PRESS [Y], [A], OR [B] TO RESUME CLOCK", 2, RGB_COLOR(255, 195, 120));
+    fill_rect(20, 416, NATIVE_W - 40, 48, RGB_COLOR(26, 40, 64));
+    draw_rect(20, 416, NATIVE_W - 40, 48, 2, RGB_COLOR(255, 155, 75));
+    draw_text_centered(433, "PRESS [Y] OR [B] TO RESUME CLOCK", 2, RGB_COLOR(255, 195, 120));
 }
 
 static void render_screen(const struct tm *shifted_tm, uint64_t now_ms) {

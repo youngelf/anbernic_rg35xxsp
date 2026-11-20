@@ -1185,7 +1185,7 @@ static void blit_full_screen(const uint32_t *pixels) {
 }
 
 /* ============================================================================
- * 6. SINGLE-SCREEN 640x480 UI RENDERER (HUD, MODALS, & R1 HELP SCREEN)
+ * 6. SINGLE-SCREEN 640x480 UI RENDERER (HUD, MODALS, & Y HELP SCREEN)
  * ============================================================================ */
 
 typedef enum {
@@ -1263,7 +1263,7 @@ static void render_ui_frame(
         /* 1. D-Pad & L1/R1 Prev/Next */
         fill_rect(14, 434, 142, 38, RGB_COLOR(36, 32, 68));
         draw_rect(14, 434, 142, 38, 2, RGB_COLOR(125, 115, 195));
-        draw_centered_text(85, 449, "[DPAD/L/R] THEME", 1, RGB_COLOR(245, 245, 255));
+        draw_centered_text(85, 449, "[DPAD/L1/R1] THEME", 1, RGB_COLOR(245, 245, 255));
 
         /* 2. [A] Flash Boot Logo */
         fill_rect(166, 434, 164, 38, RGB_COLOR(26, 108, 62));
@@ -1286,29 +1286,33 @@ static void render_ui_frame(
         draw_alpha_rect(0, 0, NATIVE_W, NATIVE_H, RGB_COLOR(6, 8, 16), 215);
 
         if (modal == MODAL_HELP) {
-            int mx = 20, my = 28, mw = 600, mh = 424;
+            int mx = 20, my = 20, mw = 600, mh = 440;
             fill_rect(mx, my, mw, mh, RGB_COLOR(20, 22, 44));
             draw_rect(mx, my, mw, mh, 3, RGB_COLOR(110, 215, 255));
 
-            draw_centered_text(320, my + 20, "RG35XXSP BOOT LOGO CONTROLS", 2, RGB_COLOR(255, 225, 85));
-            fill_rect(mx + 24, my + 44, mw - 48, 2, RGB_COLOR(70, 95, 150));
+            draw_centered_text(320, my + 14, "BOOT LOGO CUSTOMIZER - QUICK GUIDE", 2, RGB_COLOR(255, 225, 85));
+            draw_centered_text(320, my + 36,
+                               "Preview 5 Knulli 640x480 boot logos & safely flash /boot/bootlogo.bmp.",
+                               1, RGB_COLOR(185, 215, 245));
+            fill_rect(mx + 24, my + 50, mw - 48, 2, RGB_COLOR(70, 95, 150));
 
-            draw_text(mx + 24, my + 62,  "D-PAD UP / DOWN : Prev / Next Theme", 2, RGB_COLOR(235, 240, 255));
+            draw_text(mx + 24, my + 64,  "D-PAD UP / DOWN : Prev / Next Theme", 2, RGB_COLOR(235, 240, 255));
             draw_text(mx + 24, my + 92,  "LEFT/RIGHT/L1/R1: Prev / Next Theme", 2, RGB_COLOR(235, 240, 255));
-            draw_text(mx + 24, my + 122, "BUTTON A        : Flash Boot Logo", 2, RGB_COLOR(115, 255, 165));
-            draw_text(mx + 24, my + 152, "BUTTON B        : Revert to Stock Logo", 2, RGB_COLOR(255, 165, 145));
-            draw_text(mx + 24, my + 182, "SELECT / X      : Toggle 1:1 Full View", 2, RGB_COLOR(125, 220, 255));
-            draw_text(mx + 24, my + 212, "BUTTON Y        : Toggle Controls Help", 2, RGB_COLOR(215, 175, 255));
-            draw_text(mx + 24, my + 242, "MENU (ESC)      : Exit Customizer", 2, RGB_COLOR(255, 215, 120));
+            draw_text(mx + 24, my + 120, "BUTTON A        : Flash Selected Logo", 2, RGB_COLOR(115, 255, 165));
+            draw_text(mx + 24, my + 148, "BUTTON B        : Revert Stock / Exit Full", 2, RGB_COLOR(255, 165, 145));
+            draw_text(mx + 24, my + 176, "SELECT BUTTON   : Toggle 1:1 Full View", 2, RGB_COLOR(125, 220, 255));
+            draw_text(mx + 24, my + 204, "BUTTON Y        : Toggle Controls Help", 2, RGB_COLOR(215, 175, 255));
+            draw_text(mx + 24, my + 232, "MENU (ESC)      : Exit Customizer", 2, RGB_COLOR(255, 215, 120));
 
-            fill_rect(mx + 24, my + 274, mw - 48, 86, RGB_COLOR(14, 16, 32));
-            draw_rect(mx + 24, my + 274, mw - 48, 86, 2, RGB_COLOR(65, 80, 125));
-            draw_text(mx + 38, my + 286, "SURGICAL MODE (OPTION A):", 1, RGB_COLOR(255, 220, 95));
-            draw_text(mx + 38, my + 304, "Writes 640x480 32-bit BITMAPV5HEADER BGRA (1,228,938 B)", 1, RGB_COLOR(205, 215, 235));
-            draw_text(mx + 38, my + 304 + 16, "to /boot/bootlogo.bmp with SHA-256 verification and", 1, RGB_COLOR(205, 215, 235));
-            draw_text(mx + 38, my + 304 + 32, "stores the original stock image in ./backup/.", 1, RGB_COLOR(140, 245, 180));
+            fill_rect(mx + 24, my + 266, mw - 48, 96, RGB_COLOR(14, 16, 32));
+            draw_rect(mx + 24, my + 266, mw - 48, 96, 2, RGB_COLOR(65, 80, 125));
+            draw_text(mx + 38, my + 278, "SURGICAL MODE (OPTION A):", 1, RGB_COLOR(255, 220, 95));
+            draw_text(mx + 38, my + 296, "Writes 640x480 32-bit BITMAPV5HEADER BGRA (1,228,938 B)", 1, RGB_COLOR(205, 215, 235));
+            draw_text(mx + 38, my + 312, "to /boot/bootlogo.bmp with SHA-256 read-back verify and", 1, RGB_COLOR(205, 215, 235));
+            draw_text(mx + 38, my + 328, "preserves the original stock image in ./backup/.", 1, RGB_COLOR(140, 245, 180));
+            draw_text(mx + 38, my + 344, "Reboot your RG35XXSP after flashing to see the new logo.", 1, RGB_COLOR(255, 225, 130));
 
-            draw_centered_text(320, my + 384, "Press [Y], [A], or [B] to Resume", 2, RGB_COLOR(255, 235, 110));
+            draw_centered_text(320, my + 392, "Press [Y] or [B] to Resume", 2, RGB_COLOR(255, 235, 110));
         } else {
             int mx = 48, my = 100, mw = 544, mh = 280;
             fill_rect(mx, my, mw, mh, RGB_COLOR(24, 22, 48));

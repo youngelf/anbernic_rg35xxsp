@@ -80,12 +80,16 @@ static void handle_sig(int sig) {
 }
 
 /* ============================================================================
- * 1. UNIFIED INPUT BITMASKS (RG 35xxSP EVDEV + DESKTOP X11)
+ * 1. UNIFIED INPUT BITMASKS (RG 35xxSP EVDEV + DESKTOP X11) & SOUNDFONT ENGINE
  * ============================================================================ */
 
 #include "../rg35xxsp_input.h"
+#include "../rg35xxsp_keepawake.h"
 #undef BTN_QUIT
 #define BTN_QUIT    (1u << 20)
+
+#define RG35XXSP_SF2_IMPLEMENTATION
+#include "../rg35xxsp_sf2.h"
 
 /* ============================================================================
  * 2. 640x480 SOFTWARE FRAMEBUFFER & ANTI-ALIASED DRAWING PRIMITIVES
@@ -517,14 +521,79 @@ static void format_bass_pitch_name(int key_pc, const BarChord *bc, uint8_t bass_
 }
 
 /* ============================================================================
- * 5. HIGH-FIDELITY 44.1 kHz STEREO FLOATING-POINT MULTI-TRACK SYNTHESIZER
+ * 5. STUDIO 44.1 kHz STEREO SOUNDFONT (SF2) + PHYSICAL-MODELING FALLBACK SYNTH
+ *    - Runs 100% on the dedicated background audio thread (zero UI blocking)
+ *    - Style-matched GM SoundFont instruments (GeneralUser-GS.sf2 / pocketband.sf2)
+ *    - Smooth 4-voice chord voice leading, staggered natural strums, Beat-4 '&'
+ *      anticipation, chromatic walking approach bass, 16th-note ghost snares &
+ *      turnaround tom fills, velocity/micro-timing humanization, hi-hat choke,
+ *      and stereo Schroeder/Freeverb room reverb (rg35xxsp_sf2.h)
  * ============================================================================ */
 
+/* Dedicated MIDI channel layout for wide studio stereo staging */
+#define PB_CH_BASS      1
+#define PB_CH_CHORD_0   2
+#define PB_CH_CHORD_1   3
+#define PB_CH_CHORD_2   4
+#define PB_CH_CHORD_3   5
+#define PB_CH_ORGAN     6
+#define PB_CH_DRUM_KIT  9   /* Kick, Snare, Cross-stick, Toms (Center) */
+#define PB_CH_DRUM_HAT  10  /* Closed / Pedal / Open Hi-Hat (Left, with choke) */
+#define PB_CH_DRUM_CYM  11  /* Jazz Ride, Ride Bell, Crash (Right) */
+
+/* General MIDI Percussion Note Numbers (Bank 128) */
+#define GM_KICK_1       35
+#define GM_KICK_2       36
+#define GM_SIDE_STICK   37
+#define GM_SNARE_1      38
+#define GM_SNARE_2      40
+#define GM_LOW_TOM      45
+#define GM_MID_TOM      47
+#define GM_HIGH_TOM     50
+#define GM_CLOSED_HAT   42
+#define GM_PEDAL_HAT    44
+#define GM_OPEN_HAT     46
+#define GM_CRASH_CYM    49
+#define GM_RIDE_CYM     51
+#define GM_RIDE_BELL    53
+
+#define PB_MAX_PENDING_EV 32
+#define PB_MAX_ACTIVE_GATES 16
+
 typedef struct {
-    /* Sequencer sample clock */
+    bool  used;
+    int   delay_samples;
+    int   channel;
+    int   key;
+    float vel;
+    int   gate_samples;
+    bool  choke_channel;
+} PendingMidiEvent;
+
+typedef struct {
+    bool active;
+    int  channel;
+    int  key;
+    int  rem_samples;
+} ActiveMidiGate;
+
+typedef struct {
+    /* Sequencer sample clock (8th-note steps + midpoint 16th-note sub-steps) */
     uint32_t step_sample_pos;
     uint32_t step_sample_len;
+    bool     substep_16th_fired;
+    bool     was_playing;
+    int      sf2_configured_style;
 
+    /* Smooth 4-voice chord voice-leading memory */
+    bool     prev_voicing_valid;
+    int      prev_voicing[4];
+
+    /* Zero-malloc micro-timing / strum delay queue & note-off gate tracker */
+    PendingMidiEvent pending_ev[PB_MAX_PENDING_EV];
+    ActiveMidiGate   active_gates[PB_MAX_ACTIVE_GATES];
+
+    /* --- Fallback Physical-Modeling Synth State (used if no .sf2 found) --- */
     /* 1. Analog Kick Drum (Exponential pitch sweep + beater click) */
     int      kick_rem;
     int      kick_total;
@@ -569,7 +638,7 @@ typedef struct {
     float    chord_amp;
     float    chorus_lfo;
 
-    /* Per-track visual VU meters (0.0 .. 1.0) for the 640x480 UI */
+    /* Per-track visual VU meters (0.0 .. 1.0) */
     volatile float vu_kick;
     volatile float vu_snare;
     volatile float vu_hat;
@@ -579,17 +648,41 @@ typedef struct {
     uint32_t lfsr;
 } SynthState;
 
-static SynthState       g_synth;
+static SynthState      g_synth;
+static Rg35Sf2Engine   g_sf2;
+static volatile bool   g_sf2_loaded = false;
+static pthread_mutex_t g_audio_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static inline float midi_to_freq(int midi_note) {
     return 440.0f * powf(2.0f, (float)(midi_note - 69) / 12.0f);
 }
 
-static inline float next_white_noise(void) {
+static inline uint32_t next_rng_u32(void) {
     g_synth.lfsr ^= g_synth.lfsr << 13;
     g_synth.lfsr ^= g_synth.lfsr >> 17;
     g_synth.lfsr ^= g_synth.lfsr << 5;
-    return (float)((int32_t)(g_synth.lfsr >> 9) - 4194304) * (1.0f / 4194304.0f);
+    return g_synth.lfsr;
+}
+
+static inline float next_white_noise(void) {
+    uint32_t r = next_rng_u32();
+    return (float)((int32_t)(r >> 9) - 4194304) * (1.0f / 4194304.0f);
+}
+
+static inline float humanize_vel(float base_vel, float max_jitter) {
+    int32_t r = (int32_t)(next_rng_u32() >> 16) & 0x7FFF;
+    float delta = (((float)r / 16383.5f) - 1.0f) * max_jitter;
+    float v = base_vel + delta;
+    if (v < 0.08f) v = 0.08f;
+    if (v > 1.0f)  v = 1.0f;
+    return v;
+}
+
+static inline int humanize_micro_delay(int max_ms) {
+    if (max_ms <= 0) return 0;
+    int max_samp = (SAMPLE_RATE * max_ms) / 1000;
+    if (max_samp <= 0) return 0;
+    return (int)(next_rng_u32() % (uint32_t)(max_samp + 1));
 }
 
 static uint32_t compute_step_samples(int step_idx) {
@@ -603,108 +696,594 @@ static uint32_t compute_step_samples(int step_idx) {
     return (len < 1000) ? 1000 : len;
 }
 
-static void trigger_step_voices(int style_id, int bar_idx, int step_idx) {
+/* Select preferred GM program with smart fallback when running on compact pocketband.sf2 */
+static void sf2_set_prog_fallback(int channel, int bank, int pref1, int pref2, int pref3) {
+    if (!rg35_sf2_ready(&g_sf2)) return;
+    int idx = tsf_get_presetindex(g_sf2.synth, bank, pref1);
+    if (idx < 0 && pref2 >= 0) idx = tsf_get_presetindex(g_sf2.synth, bank, pref2);
+    if (idx < 0 && pref3 >= 0) idx = tsf_get_presetindex(g_sf2.synth, bank, pref3);
+    if (idx < 0) idx = (bank == 128) ? tsf_get_presetindex(g_sf2.synth, 128, 0) : 0;
+    if (idx >= 0) tsf_channel_set_presetindex(g_sf2.synth, channel, idx);
+}
+
+static int style_chord_is_guitar(int style_id) {
+    return (style_id == 1 || style_id == 2 || style_id == 3 || style_id == 4);
+}
+
+static void sf2_configure_style_instruments(int style_id) {
+    if (!rg35_sf2_ready(&g_sf2)) return;
+    int drum_pref1 = 0, drum_pref2 = 0;
+    int bass_prog  = 33;
+    int chord_p1   = 4, chord_p2 = 27;
+    int organ_prog = -1;
+    float chord_vol = 0.72f;
+    float bass_vol  = 0.92f;
+    float drum_vol  = 0.96f;
+
+    switch (style_id) {
+        case 0: /* Blues Shuffle 4/4: Room/Standard Kit, Finger Bass, Tine E.Piano */
+            drum_pref1 = 8; drum_pref2 = 0;
+            bass_prog  = 33;
+            chord_p1   = 4; chord_p2 = 27;
+            organ_prog = -1;
+            chord_vol  = 0.74f;
+            break;
+        case 1: /* Slow Blues 3/4: Room/Standard Kit, Finger Bass, Clean Guitar + Tonewheel Organ */
+            drum_pref1 = 8; drum_pref2 = 0;
+            bass_prog  = 33;
+            chord_p1   = 27; chord_p2 = 26;
+            organ_prog = 16;
+            chord_vol  = 0.72f;
+            break;
+        case 2: /* Classic Rock 4/4: Power/Standard Kit, Picked Bass, Overdrive/Clean Guitar + Rock Organ */
+            drum_pref1 = 16; drum_pref2 = 0;
+            bass_prog  = 34;
+            chord_p1   = 29; chord_p2 = 27;
+            organ_prog = 18;
+            chord_vol  = 0.68f;
+            break;
+        case 3: /* Rock Ballad 3/4: Standard Kit, Picked Bass, Clean Guitar + Rock Organ */
+            drum_pref1 = 0; drum_pref2 = 8;
+            bass_prog  = 34;
+            chord_p1   = 27; chord_p2 = 25;
+            organ_prog = 18;
+            chord_vol  = 0.72f;
+            break;
+        case 4: /* Jazz Swing 4/4: Jazz Kit, Acoustic Upright Bass, Jazz Hollowbody Guitar */
+            drum_pref1 = 32; drum_pref2 = 0;
+            bass_prog  = 32;
+            chord_p1   = 26; chord_p2 = 4;
+            organ_prog = -1;
+            chord_vol  = 0.76f;
+            drum_vol   = 0.88f;
+            break;
+        case 5: /* Jazz Waltz 3/4: Brush/Jazz Kit, Acoustic Upright Bass, Tine E.Piano */
+        default:
+            drum_pref1 = 40; drum_pref2 = 32;
+            bass_prog  = 32;
+            chord_p1   = 4; chord_p2 = 26;
+            organ_prog = -1;
+            chord_vol  = 0.76f;
+            drum_vol   = 0.86f;
+            break;
+    }
+
+    sf2_set_prog_fallback(PB_CH_DRUM_KIT, 128, drum_pref1, drum_pref2, 0);
+    sf2_set_prog_fallback(PB_CH_DRUM_HAT, 128, drum_pref1, drum_pref2, 0);
+    sf2_set_prog_fallback(PB_CH_DRUM_CYM, 128, drum_pref1, drum_pref2, 0);
+    rg35_sf2_set_channel_pan_vol(&g_sf2, PB_CH_DRUM_KIT, 0.50f, drum_vol);
+    rg35_sf2_set_channel_pan_vol(&g_sf2, PB_CH_DRUM_HAT, 0.34f, drum_vol * 0.88f);
+    rg35_sf2_set_channel_pan_vol(&g_sf2, PB_CH_DRUM_CYM, 0.68f, drum_vol * 0.86f);
+
+    sf2_set_prog_fallback(PB_CH_BASS, 0, bass_prog, 33, 32);
+    rg35_sf2_set_channel_pan_vol(&g_sf2, PB_CH_BASS, 0.46f, bass_vol);
+
+    static const float k_chord_pans[4] = { 0.36f, 0.47f, 0.57f, 0.68f };
+    for (int v = 0; v < 4; v++) {
+        sf2_set_prog_fallback(PB_CH_CHORD_0 + v, 0, chord_p1, chord_p2, 4);
+        rg35_sf2_set_channel_pan_vol(&g_sf2, PB_CH_CHORD_0 + v, k_chord_pans[v], chord_vol);
+    }
+
+    if (organ_prog >= 0) {
+        sf2_set_prog_fallback(PB_CH_ORGAN, 0, organ_prog, 16, 4);
+        rg35_sf2_set_channel_pan_vol(&g_sf2, PB_CH_ORGAN, 0.30f, 0.42f);
+    }
+    g_synth.sf2_configured_style = style_id;
+}
+
+static void sf2_clear_queues(void) {
+    memset(g_synth.pending_ev, 0, sizeof(g_synth.pending_ev));
+    memset(g_synth.active_gates, 0, sizeof(g_synth.active_gates));
+    if (rg35_sf2_ready(&g_sf2)) {
+        rg35_sf2_all_notes_off(&g_sf2);
+    }
+}
+
+static void sf2_fire_note_now(int channel, int key, float vel, int gate_samples, bool choke_channel) {
+    if (!rg35_sf2_ready(&g_sf2)) return;
+    if (choke_channel) {
+        tsf_channel_sounds_off_all(g_sf2.synth, channel);
+        for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
+            if (g_synth.active_gates[i].active && g_synth.active_gates[i].channel == channel) {
+                g_synth.active_gates[i].active = false;
+            }
+        }
+    }
+    rg35_sf2_note_on(&g_sf2, channel, key, vel);
+    if (gate_samples > 0) {
+        /* Replace existing gate on same channel+key or claim free/shortest slot */
+        int slot = -1;
+        int min_rem = 0x7FFFFFFF;
+        int min_idx = 0;
+        for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
+            if (g_synth.active_gates[i].active &&
+                g_synth.active_gates[i].channel == channel &&
+                g_synth.active_gates[i].key == key) {
+                slot = i;
+                break;
+            }
+            if (!g_synth.active_gates[i].active && slot < 0) {
+                slot = i;
+            }
+            if (g_synth.active_gates[i].active && g_synth.active_gates[i].rem_samples < min_rem) {
+                min_rem = g_synth.active_gates[i].rem_samples;
+                min_idx = i;
+            }
+        }
+        if (slot < 0) {
+            rg35_sf2_note_off(&g_sf2, g_synth.active_gates[min_idx].channel, g_synth.active_gates[min_idx].key);
+            slot = min_idx;
+        }
+        g_synth.active_gates[slot].active = true;
+        g_synth.active_gates[slot].channel = channel;
+        g_synth.active_gates[slot].key = key;
+        g_synth.active_gates[slot].rem_samples = gate_samples;
+    }
+}
+
+static void sf2_schedule_note(int delay_samples, int channel, int key, float vel,
+                              int gate_samples, bool choke_channel) {
+    if (!rg35_sf2_ready(&g_sf2)) return;
+    if (delay_samples <= 0) {
+        sf2_fire_note_now(channel, key, vel, gate_samples, choke_channel);
+        return;
+    }
+    for (int i = 0; i < PB_MAX_PENDING_EV; i++) {
+        if (!g_synth.pending_ev[i].used) {
+            g_synth.pending_ev[i].used = true;
+            g_synth.pending_ev[i].delay_samples = delay_samples;
+            g_synth.pending_ev[i].channel = channel;
+            g_synth.pending_ev[i].key = key;
+            g_synth.pending_ev[i].vel = vel;
+            g_synth.pending_ev[i].gate_samples = gate_samples;
+            g_synth.pending_ev[i].choke_channel = choke_channel;
+            return;
+        }
+    }
+    /* Queue full: fire immediately rather than dropping */
+    sf2_fire_note_now(channel, key, vel, gate_samples, choke_channel);
+}
+
+static void sf2_release_channel(int channel) {
+    if (!rg35_sf2_ready(&g_sf2)) return;
+    rg35_sf2_channel_notes_off(&g_sf2, channel);
+    for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
+        if (g_synth.active_gates[i].active && g_synth.active_gates[i].channel == channel) {
+            g_synth.active_gates[i].active = false;
+        }
+    }
+    for (int i = 0; i < PB_MAX_PENDING_EV; i++) {
+        if (g_synth.pending_ev[i].used && g_synth.pending_ev[i].channel == channel) {
+            g_synth.pending_ev[i].used = false;
+        }
+    }
+}
+
+/* Compute exact bass MIDI note in E1 (28) .. Eb2 (39) + scale degree offset */
+static int compute_bass_midi(int key_pc, const BarChord *bc, uint8_t bass_deg) {
+    if (bass_deg == 0 || bass_deg > 6 || !bc) return -1;
+    int chord_root_pc = (key_pc + bc->root_offset) % 12;
+    int third_semi = (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7) ? 3 : 4;
+    int semitone_off = 0;
+    switch (bass_deg) {
+        case 1: semitone_off = 0;          break; /* R  */
+        case 2: semitone_off = third_semi; break; /* 3  */
+        case 3: semitone_off = 7;          break; /* 5  */
+        case 4: semitone_off = 9;          break; /* 6  */
+        case 5: semitone_off = 10;         break; /* b7 */
+        case 6: semitone_off = 12;         break; /* 8  */
+    }
+    int base_midi = 28 + ((chord_root_pc - 4 + 12) % 12);
+    return base_midi + semitone_off;
+}
+
+/* Chromatic walking approach note on Beat 4 leading smoothly into next bar's root */
+static int compute_walking_approach_bass(int key_pc, const BarChord *cur_bc,
+                                         const BarChord *next_bc, int cur_midi, int bar_idx) {
+    if (!next_bc) return cur_midi;
+    int next_root = compute_bass_midi(key_pc, next_bc, 1);
+    if (next_root <= 0) return cur_midi;
+    bool changing = (!cur_bc) || (cur_bc->root_offset != next_bc->root_offset)
+                    || (cur_bc->qual != next_bc->qual);
+    if (changing || (bar_idx % 2 == 1)) {
+        int approach = (next_root > cur_midi) ? (next_root - 1) : (next_root + 1);
+        if (approach == next_root || abs(approach - next_root) > 2) {
+            approach = next_root - 1;
+        }
+        if (approach < 28) approach = 28;
+        if (approach > 52) approach = 52;
+        return approach;
+    }
+    return cur_midi;
+}
+
+static void sort3_int(int a[3]) {
+    if (a[0] > a[1]) { int t = a[0]; a[0] = a[1]; a[1] = t; }
+    if (a[1] > a[2]) { int t = a[1]; a[1] = a[2]; a[2] = t; }
+    if (a[0] > a[1]) { int t = a[0]; a[0] = a[1]; a[1] = t; }
+}
+
+/* Smooth 4-voice chord voice leading minimizing semitone movement across bar changes */
+static void compute_voice_led_chord(int key_pc, const BarChord *bc, int out_midi[4]) {
+    int root_pc  = (key_pc + bc->root_offset) % 12;
+    int third_pc = (root_pc + ((bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7) ? 3 : 4)) % 12;
+    int fifth_pc = (root_pc + 7) % 12;
+    int sev_pc;
+    if (bc->qual == CHQ_MAJ7) {
+        sev_pc = (root_pc + 11) % 12;
+    } else if (bc->qual == CHQ_DOM7 || bc->qual == CHQ_MIN7) {
+        sev_pc = (root_pc + 10) % 12;
+    } else {
+        sev_pc = (root_pc + 2) % 12; /* Add 9th for lush 4-voice triad comping */
+    }
+
+    int target_center = 61;
+    if (g_synth.prev_voicing_valid) {
+        target_center = (g_synth.prev_voicing[1] + g_synth.prev_voicing[2] + g_synth.prev_voicing[3]) / 3;
+        if (target_center < 57) target_center = 57;
+        if (target_center > 65) target_center = 65;
+    }
+
+    int best[4] = { 48 + root_pc, 52 + third_pc, 55 + fifth_pc, 58 + sev_pc };
+    int best_cost = 0x7FFFFFFF;
+    int upper_pcs[3] = { third_pc, fifth_pc, sev_pc };
+
+    for (int base_midi = 52; base_midi <= 64; base_midi++) {
+        int cand[4];
+        cand[0] = 48 + root_pc;
+        if (cand[0] < 45) cand[0] += 12;
+
+        int placed[3];
+        for (int i = 0; i < 3; i++) {
+            placed[i] = base_midi + ((upper_pcs[i] - (base_midi % 12) + 12) % 12);
+        }
+        sort3_int(placed);
+        if (placed[0] <= cand[0] + 2) {
+            placed[0] += 12;
+            sort3_int(placed);
+        }
+        cand[1] = placed[0];
+        cand[2] = placed[1];
+        cand[3] = placed[2];
+
+        int center = (cand[1] + cand[2] + cand[3]) / 3;
+        int cost = abs(center - target_center) * 2;
+        if (g_synth.prev_voicing_valid) {
+            for (int v = 1; v < 4; v++) {
+                cost += abs(cand[v] - g_synth.prev_voicing[v]) * 3;
+            }
+        }
+        if (cost < best_cost) {
+            best_cost = cost;
+            for (int v = 0; v < 4; v++) best[v] = cand[v];
+        }
+    }
+
+    for (int v = 0; v < 4; v++) {
+        out_midi[v] = best[v];
+        g_synth.prev_voicing[v] = best[v];
+    }
+    g_synth.prev_voicing_valid = true;
+}
+
+static float style_comping_velocity(int style_id, int beats_per_bar, int bar_idx,
+                                    int step_idx, bool next_changes) {
+    int spb = beats_per_bar * 2;
+    /* Subtle Beat-4 '&' (or Beat-3 '&') harmonic anticipation before a chord change */
+    if (step_idx == spb - 1 && (next_changes || (bar_idx % 2 == 1))) {
+        return 0.64f;
+    }
+    /* Jazz Swing (style 4): Charleston comping + bar-2 syncopated phrasing */
+    if (style_id == 4) {
+        if (bar_idx % 2 == 0) {
+            if (step_idx == 0) return 0.72f;
+            if (step_idx == 3) return 0.66f;
+            if (step_idx == 6) return 0.56f;
+        } else {
+            if (step_idx == 1) return 0.64f;
+            if (step_idx == 4) return 0.60f;
+        }
+        return 0.0f;
+    }
+    if (beats_per_bar == 4) {
+        if (step_idx == 0) return 0.76f;
+        if (step_idx == 3) return 0.66f;
+        if (step_idx == 4 && (bar_idx % 2 == 0)) return 0.58f;
+        if (step_idx == 5 && (bar_idx % 2 == 1)) return 0.62f;
+        return 0.0f;
+    }
+    /* 3/4 styles (Slow Blues 3/4, Rock Ballad 3/4, Jazz Waltz 3/4) */
+    if (step_idx == 0) return 0.74f;
+    if (step_idx == 2) return 0.60f;
+    if (step_idx == 4) return 0.64f;
+    return 0.0f;
+}
+
+static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub_step) {
     const StylePreset *st = &k_styles[style_id];
-    const BarChord *bc = &st->bars[bar_idx % st->num_bars];
-    int chord_root_pc = (g_key_pc + bc->root_offset) % 12;
+    const BarChord *cur_bc  = &st->bars[bar_idx % st->num_bars];
+    const BarChord *next_bc = &st->bars[(bar_idx + 1) % st->num_bars];
+    bool next_changes = (cur_bc->root_offset != next_bc->root_offset) || (cur_bc->qual != next_bc->qual);
 
+    int spb = st->steps_per_bar;
     bool is_fill_bar = ((bar_idx + 1) % 4 == 0 && g_auto_fill) || g_fill_queued;
-    int last_two = st->steps_per_bar - 2;
+    bool is_turnaround = ((bar_idx + 1) == st->num_bars) && is_fill_bar;
+    int fill_start = is_turnaround ? (spb >= 4 ? spb - 4 : 0) : (spb >= 2 ? spb - 2 : 0);
+    bool is_jazz = (style_id == 4 || style_id == 5);
+    bool use_sf2 = rg35_sf2_ready(&g_sf2);
 
+    if (use_sf2 && g_synth.sf2_configured_style != style_id) {
+        sf2_configure_style_instruments(style_id);
+    }
+
+    /* =====================================================================
+     * Mid-Step 16th-Note Subdivision (sub_step == 1):
+     *   - Expressive 16th-note descending tom/snare turnaround fills
+     *   - Subtle 16th-note ghost snare notes for live studio groove
+     *   - Chromatic 16th bass pickup into turnaround bar 1
+     * ===================================================================== */
+    if (sub_step == 1) {
+        if (is_fill_bar && step_idx >= fill_start) {
+            int fp = step_idx - fill_start;
+            int fill_note = (fp == 0) ? GM_SNARE_1 :
+                            (fp == 1) ? GM_HIGH_TOM :
+                            (fp == 2) ? GM_MID_TOM : GM_LOW_TOM;
+            if (use_sf2) {
+                sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_KIT, fill_note,
+                                  humanize_vel(0.68f, 0.06f), 0, false);
+            } else {
+                g_synth.snare_total  = (SAMPLE_RATE * 110) / 1000;
+                g_synth.snare_rem    = g_synth.snare_total;
+                g_synth.snare_phase1 = 0.0f;
+                g_synth.snare_phase2 = 0.0f;
+                g_synth.snare_amp    = 0.42f;
+            }
+            g_synth.vu_snare = 0.72f;
+        } else {
+            /* Subtle 16th-note ghost snare on odd bars (Blues / Rock / Jazz pocket) */
+            bool ghost = ((bar_idx % 2 == 1) && (step_idx == 3 || step_idx == spb - 1)) ||
+                         (style_id == 0 && step_idx == 1 && (bar_idx % 4 == 2));
+            if (ghost) {
+                if (use_sf2) {
+                    int gnote = (style_id == 5) ? GM_SIDE_STICK : GM_SNARE_1;
+                    sf2_schedule_note(humanize_micro_delay(3), PB_CH_DRUM_KIT, gnote,
+                                      humanize_vel(0.28f, 0.04f), 0, false);
+                } else {
+                    g_synth.snare_total = (SAMPLE_RATE * 75) / 1000;
+                    g_synth.snare_rem   = g_synth.snare_total;
+                    g_synth.snare_amp   = 0.22f;
+                }
+            }
+        }
+
+        /* Chromatic 16th bass pickup on final 16th of a fill bar */
+        if (g_mix_mode != MIX_DRUMS_ONLY && is_fill_bar && step_idx == spb - 1) {
+            int next_root = compute_bass_midi(g_key_pc, next_bc, 1);
+            if (next_root > 0) {
+                int pickup = (next_root > 28) ? (next_root - 1) : 28;
+                if (use_sf2) {
+                    sf2_release_channel(PB_CH_BASS);
+                    sf2_schedule_note(0, PB_CH_BASS, pickup, humanize_vel(0.62f, 0.04f),
+                                      (int)(g_synth.step_sample_len / 2), false);
+                } else {
+                    g_synth.bass_total = (SAMPLE_RATE * 140) / 1000;
+                    g_synth.bass_rem   = g_synth.bass_total;
+                    g_synth.bass_freq  = midi_to_freq(pickup);
+                    g_synth.bass_amp   = 0.48f;
+                }
+            }
+        }
+        return;
+    }
+
+    /* =====================================================================
+     * Primary Eighth-Note Step (sub_step == 0)
+     * ===================================================================== */
     uint8_t kick_hit  = g_pattern[style_id][TRK_KICK][step_idx];
     uint8_t snare_hit = g_pattern[style_id][TRK_SNARE][step_idx];
     uint8_t clhat_hit = g_pattern[style_id][TRK_CLHAT][step_idx];
     uint8_t ophat_hit = g_pattern[style_id][TRK_OPHAT][step_idx];
     uint8_t bass_deg  = g_pattern[style_id][TRK_BASS][step_idx];
 
-    /* Turnaround drum fill on the last beat ('4 &' or '3 &') of a fill bar */
-    if (is_fill_bar && step_idx >= last_two) {
-        snare_hit = (step_idx == st->steps_per_bar - 1) ? 2 : 1;
-        if (step_idx == last_two) kick_hit = 1;
+    /* Subtle bar-2 syncopated kick pickup on Blues / Classic Rock */
+    if (!is_fill_bar && (bar_idx % 2 == 1) && step_idx == spb - 3 && kick_hit == 0 &&
+        (style_id == 0 || style_id == 2)) {
+        kick_hit = 1;
     }
-    if (step_idx == st->steps_per_bar - 1 && g_fill_queued) {
+
+    /* Turnaround drum fill on final beat(s) of a fill bar */
+    if (is_fill_bar && step_idx >= fill_start) {
+        snare_hit = (step_idx == spb - 1) ? 2 : 1;
+        if (step_idx == fill_start) kick_hit = 2;
+    }
+    if (step_idx == spb - 1 && g_fill_queued) {
         g_fill_queued = false;
     }
 
-    /* 1. Trigger Kick */
-    if (kick_hit > 0) {
-        g_synth.kick_total = (SAMPLE_RATE * 155) / 1000;
-        g_synth.kick_rem   = g_synth.kick_total;
-        g_synth.kick_phase = 0.0f;
-        g_synth.kick_amp   = (kick_hit == 2) ? 0.88f : 0.68f;
-        g_synth.vu_kick    = (kick_hit == 2) ? 1.0f  : 0.78f;
-    }
-
-    /* 2. Trigger Snare */
-    if (snare_hit > 0) {
-        g_synth.snare_total  = (SAMPLE_RATE * 165) / 1000;
-        g_synth.snare_rem    = g_synth.snare_total;
-        g_synth.snare_phase1 = 0.0f;
-        g_synth.snare_phase2 = 0.0f;
-        g_synth.snare_amp    = (snare_hit == 2) ? 0.76f : 0.54f;
-        g_synth.vu_snare     = (snare_hit == 2) ? 1.0f  : 0.72f;
-    }
-
-    /* 3. Trigger Open/Ride or Closed Hi-Hat (Closed Hat chokes Open Hat) */
-    if (ophat_hit > 0) {
-        g_synth.hat_total   = (SAMPLE_RATE * 260) / 1000;
-        g_synth.hat_rem     = g_synth.hat_total;
-        g_synth.hat_amp     = (ophat_hit == 2) ? 0.42f : 0.30f;
-        g_synth.hat_is_open = true;
-        g_synth.vu_hat      = (ophat_hit == 2) ? 0.95f : 0.70f;
-    } else if (clhat_hit > 0) {
-        g_synth.hat_total   = (SAMPLE_RATE * 54) / 1000;
-        g_synth.hat_rem     = g_synth.hat_total;
-        g_synth.hat_amp     = (clhat_hit == 2) ? 0.38f : 0.25f;
-        g_synth.hat_is_open = false;
-        g_synth.vu_hat      = (clhat_hit == 2) ? 0.75f : 0.52f;
-    }
-
-    /* 4. Trigger Electric Bass Note (if mix includes Bass) */
-    if (g_mix_mode != MIX_DRUMS_ONLY && bass_deg > 0) {
-        int semitone_off = 0;
-        int third_semi = (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7) ? 3 : 4;
-        switch (bass_deg) {
-            case 1: semitone_off = 0;          break; /* R  */
-            case 2: semitone_off = third_semi; break; /* 3  */
-            case 3: semitone_off = 7;          break; /* 5  */
-            case 4: semitone_off = 9;          break; /* 6  */
-            case 5: semitone_off = 10;         break; /* b7 */
-            case 6: semitone_off = 12;         break; /* 8  */
+    /* 1. Trigger Drums */
+    if (use_sf2) {
+        /* Tasteful crash cymbal on Beat 1 after a turnaround / fill bar */
+        if (step_idx == 0 && bar_idx == 0 && g_auto_fill && (next_rng_u32() % 100u) < 40u) {
+            sf2_schedule_note(0, PB_CH_DRUM_CYM, GM_CRASH_CYM, humanize_vel(0.62f, 0.05f), 0, false);
         }
-        int base_midi = 28 + ((chord_root_pc - 4 + 12) % 12); /* E1 .. Eb2 */
-        int midi_note = base_midi + semitone_off;
 
-        g_synth.bass_total = (SAMPLE_RATE * 350) / 1000;
-        g_synth.bass_rem   = g_synth.bass_total;
-        g_synth.bass_freq  = midi_to_freq(midi_note);
-        g_synth.bass_amp   = (step_idx == 0) ? 0.68f : 0.56f;
-        g_synth.vu_bass    = (step_idx == 0) ? 0.96f : 0.80f;
+        if (kick_hit > 0) {
+            int k_note = is_jazz ? GM_KICK_1 : GM_KICK_2;
+            float k_vel = (kick_hit == 2) ? 0.92f : 0.74f;
+            sf2_schedule_note(0, PB_CH_DRUM_KIT, k_note, humanize_vel(k_vel, 0.04f), 0, false);
+            g_synth.vu_kick = (kick_hit == 2) ? 1.0f : 0.78f;
+        }
+
+        if (snare_hit > 0) {
+            int s_note;
+            if (is_fill_bar && step_idx >= fill_start) {
+                s_note = (step_idx == spb - 1) ? GM_LOW_TOM :
+                         (step_idx == spb - 2) ? GM_MID_TOM : GM_SNARE_1;
+            } else {
+                s_note = (snare_hit == 2) ? GM_SNARE_2 : GM_SNARE_1;
+            }
+            float s_vel = (snare_hit == 2) ? 0.88f : 0.64f;
+            sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_KIT, s_note,
+                              humanize_vel(s_vel, 0.05f), 0, false);
+            g_synth.vu_snare = (snare_hit == 2) ? 1.0f : 0.72f;
+        }
+
+        /* Hi-Hat / Ride Cymbal with authentic closed-hat choke */
+        if (ophat_hit > 0) {
+            if (is_jazz) {
+                int r_note = (ophat_hit == 2) ? GM_RIDE_BELL : GM_RIDE_CYM;
+                float r_vel = (ophat_hit == 2) ? 0.78f : 0.60f;
+                sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_CYM, r_note,
+                                  humanize_vel(r_vel, 0.05f), 0, false);
+            } else {
+                float oh_vel = (ophat_hit == 2) ? 0.78f : 0.62f;
+                sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_HAT, GM_OPEN_HAT,
+                                  humanize_vel(oh_vel, 0.04f), 0, false);
+            }
+            g_synth.vu_hat = (ophat_hit == 2) ? 0.95f : 0.70f;
+        } else if (clhat_hit > 0) {
+            int ch_note = is_jazz ? GM_PEDAL_HAT : GM_CLOSED_HAT;
+            float ch_vel = (clhat_hit == 2) ? 0.74f : 0.52f;
+            /* choke_channel=true cleanly chokes any ringing Open Hi-Hat */
+            sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_HAT, ch_note,
+                              humanize_vel(ch_vel, 0.05f), 0, true);
+            g_synth.vu_hat = (clhat_hit == 2) ? 0.75f : 0.52f;
+        }
+    } else {
+        /* Fallback physical-modeling drums */
+        if (kick_hit > 0) {
+            g_synth.kick_total = (SAMPLE_RATE * 155) / 1000;
+            g_synth.kick_rem   = g_synth.kick_total;
+            g_synth.kick_phase = 0.0f;
+            g_synth.kick_amp   = (kick_hit == 2) ? 0.88f : 0.68f;
+            g_synth.vu_kick    = (kick_hit == 2) ? 1.0f  : 0.78f;
+        }
+        if (snare_hit > 0) {
+            g_synth.snare_total  = (SAMPLE_RATE * 165) / 1000;
+            g_synth.snare_rem    = g_synth.snare_total;
+            g_synth.snare_phase1 = 0.0f;
+            g_synth.snare_phase2 = 0.0f;
+            g_synth.snare_amp    = (snare_hit == 2) ? 0.76f : 0.54f;
+            g_synth.vu_snare     = (snare_hit == 2) ? 1.0f  : 0.72f;
+        }
+        if (ophat_hit > 0) {
+            g_synth.hat_total   = (SAMPLE_RATE * 260) / 1000;
+            g_synth.hat_rem     = g_synth.hat_total;
+            g_synth.hat_amp     = (ophat_hit == 2) ? 0.42f : 0.30f;
+            g_synth.hat_is_open = true;
+            g_synth.vu_hat      = (ophat_hit == 2) ? 0.95f : 0.70f;
+        } else if (clhat_hit > 0) {
+            g_synth.hat_total   = (SAMPLE_RATE * 54) / 1000;
+            g_synth.hat_rem     = g_synth.hat_total;
+            g_synth.hat_amp     = (clhat_hit == 2) ? 0.38f : 0.25f;
+            g_synth.hat_is_open = false;
+            g_synth.vu_hat      = (clhat_hit == 2) ? 0.75f : 0.52f;
+        }
     }
 
-    /* 5. Trigger 4-Voice Rhythm Guitar / Keys Comping Stab (if MIX_FULL_BAND) */
-    if (g_mix_mode == MIX_FULL_BAND) {
-        bool comp_hit = (step_idx == 0) ||
-                        (st->beats_per_bar == 4 && (step_idx == 3 || step_idx == 6)) ||
-                        (st->beats_per_bar == 3 && step_idx == 2);
-        if (comp_hit) {
-            int root_midi  = 48 + chord_root_pc; /* C3..B3 range */
-            int third_semi = (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7) ? 3 : 4;
-            int fifth_semi = 7;
-            int sev_semi   = (bc->qual == CHQ_MAJ7) ? 11 :
-                             (bc->qual == CHQ_DOM7 || bc->qual == CHQ_MIN7) ? 10 : 12;
+    /* 2. Trigger Electric / Upright Bass (with Beat-4 '&' anticipation & chromatic walking approach) */
+    if (g_mix_mode != MIX_DRUMS_ONLY) {
+        bool anticipate = (step_idx == spb - 1) && next_changes && (style_id == 0 || style_id == 2);
+        const BarChord *bass_bc = anticipate ? next_bc : cur_bc;
+        uint8_t eff_deg = anticipate ? 1 : bass_deg;
 
-            g_synth.chord_freqs[0] = midi_to_freq(root_midi);
-            g_synth.chord_freqs[1] = midi_to_freq(root_midi + fifth_semi);
-            g_synth.chord_freqs[2] = midi_to_freq(root_midi + 12 + third_semi);
-            g_synth.chord_freqs[3] = midi_to_freq(root_midi + 12 + sev_semi);
-            for (int v = 0; v < 4; v++) {
-                g_synth.chord_strum_delay[v] = v * ((SAMPLE_RATE * 9) / 1000);
+        if (eff_deg > 0) {
+            int midi_note = compute_bass_midi(g_key_pc, bass_bc, eff_deg);
+            if (!anticipate && step_idx >= spb - 2) {
+                bool is_last_bass = (step_idx == spb - 1) ||
+                                    (step_idx == spb - 2 && g_pattern[style_id][TRK_BASS][spb - 1] == 0);
+                if (is_last_bass) {
+                    midi_note = compute_walking_approach_bass(g_key_pc, cur_bc, next_bc, midi_note, bar_idx);
+                }
             }
-            g_synth.chord_total = (SAMPLE_RATE * ((step_idx == 0) ? 340 : 190)) / 1000;
-            g_synth.chord_rem   = g_synth.chord_total;
-            g_synth.chord_amp   = (step_idx == 0) ? 0.32f : 0.24f;
-            g_synth.vu_chord    = (step_idx == 0) ? 0.90f : 0.68f;
+            if (midi_note > 0) {
+                int sustain_steps = 1;
+                for (int look = step_idx + 1; look < spb; look++) {
+                    if (g_pattern[style_id][TRK_BASS][look] > 0) break;
+                    sustain_steps++;
+                }
+                if (use_sf2) {
+                    float b_vel = (step_idx == 0 || anticipate) ? 0.88f : ((step_idx % 2 == 0) ? 0.78f : 0.68f);
+                    int gate_samp = (int)((double)g_synth.step_sample_len * ((double)sustain_steps * 0.90));
+                    sf2_release_channel(PB_CH_BASS);
+                    sf2_schedule_note(0, PB_CH_BASS, midi_note, humanize_vel(b_vel, 0.04f), gate_samp, false);
+                } else {
+                    g_synth.bass_total = (SAMPLE_RATE * 350) / 1000;
+                    g_synth.bass_rem   = g_synth.bass_total;
+                    g_synth.bass_freq  = midi_to_freq(midi_note);
+                    g_synth.bass_amp   = (step_idx == 0) ? 0.68f : 0.56f;
+                }
+                g_synth.vu_bass = (step_idx == 0) ? 0.96f : 0.80f;
+            }
+        }
+    }
+
+    /* 3. Trigger 4-Voice Smooth Voice-Led Chords (with staggered strum & Beat-4 '&' anticipation) */
+    if (g_mix_mode == MIX_FULL_BAND) {
+        float comp_vel = style_comping_velocity(style_id, st->beats_per_bar, bar_idx, step_idx, next_changes);
+        if (comp_vel > 0.0f) {
+            bool is_antic = (step_idx == spb - 1) && next_changes;
+            const BarChord *chord_bc = is_antic ? next_bc : cur_bc;
+            int chord_midi[4];
+            compute_voice_led_chord(g_key_pc, chord_bc, chord_midi);
+
+            if (use_sf2) {
+                int is_gtr = style_chord_is_guitar(style_id);
+                int strum_step = is_gtr ? ((SAMPLE_RATE * 11) / 1000) : ((SAMPLE_RATE * 3) / 1000);
+                bool upstroke = is_gtr && ((step_idx % 2) == 1);
+                int gate_mult = (step_idx == 0) ? 2 : 1;
+                int gate_samp = (int)((double)g_synth.step_sample_len * (double)gate_mult * 0.92);
+                int jitter = humanize_micro_delay(2);
+
+                for (int v = 0; v < 4; v++) {
+                    sf2_release_channel(PB_CH_CHORD_0 + v);
+                }
+                for (int v = 0; v < 4; v++) {
+                    int voice_idx = upstroke ? (3 - v) : v;
+                    int dly = jitter + v * strum_step;
+                    float v_vel = humanize_vel(comp_vel - (float)v * 0.03f, 0.04f);
+                    sf2_schedule_note(dly, PB_CH_CHORD_0 + voice_idx, chord_midi[voice_idx],
+                                      v_vel, gate_samp, false);
+                }
+
+                /* Subtle warm Rock/Tonewheel Organ pad layer on Beat 1 for Rock & Slow Blues */
+                if (step_idx == 0 && (style_id == 1 || style_id == 2 || style_id == 3)) {
+                    sf2_release_channel(PB_CH_ORGAN);
+                    int pad_gate = (int)((double)g_synth.step_sample_len * (double)(spb - 1) * 0.88);
+                    sf2_schedule_note(0, PB_CH_ORGAN, chord_midi[0], 0.42f, pad_gate, false);
+                    sf2_schedule_note(0, PB_CH_ORGAN, chord_midi[1], 0.36f, pad_gate, false);
+                    sf2_schedule_note(0, PB_CH_ORGAN, chord_midi[2], 0.36f, pad_gate, false);
+                }
+            } else {
+                for (int v = 0; v < 4; v++) {
+                    g_synth.chord_freqs[v] = midi_to_freq(chord_midi[v]);
+                    g_synth.chord_strum_delay[v] = v * ((SAMPLE_RATE * 10) / 1000);
+                }
+                g_synth.chord_total = (SAMPLE_RATE * ((step_idx == 0) ? 340 : 190)) / 1000;
+                g_synth.chord_rem   = g_synth.chord_total;
+                g_synth.chord_amp   = (step_idx == 0) ? 0.32f : 0.24f;
+            }
+            g_synth.vu_chord = (step_idx == 0) ? 0.90f : 0.68f;
         }
     }
 }
@@ -712,18 +1291,171 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx) {
 static void init_synth(void) {
     memset(&g_synth, 0, sizeof(g_synth));
     g_synth.lfsr = 0x13579BDFu;
+    g_synth.sf2_configured_style = -1;
     g_synth.step_sample_len = compute_step_samples(0);
     g_synth.step_sample_pos = 0;
 }
 
+static void init_sf2_engine(void) {
+    if (g_sf2_loaded) return;
+    /* reverb_wet=0.20 gives lush studio room depth; master_gain=1.35f feeds soft limiter */
+    bool ok = rg35_sf2_init(&g_sf2, SAMPLE_RATE, 64, 0.20f, 1.35f);
+    g_sf2_loaded = ok;
+    if (ok) {
+        g_synth.sf2_configured_style = -1;
+        sf2_configure_style_instruments(g_style_idx);
+    }
+}
+
+/* Advance sequencer clock, pending strum/micro-timing events, and note-off gates by 1 sample */
+static void sequencer_tick_one_sample(bool playing) {
+    /* 1. Fire any delayed micro-timing / staggered strum notes */
+    for (int i = 0; i < PB_MAX_PENDING_EV; i++) {
+        if (g_synth.pending_ev[i].used) {
+            if (--g_synth.pending_ev[i].delay_samples <= 0) {
+                PendingMidiEvent ev = g_synth.pending_ev[i];
+                g_synth.pending_ev[i].used = false;
+                sf2_fire_note_now(ev.channel, ev.key, ev.vel, ev.gate_samples, ev.choke_channel);
+            }
+        }
+    }
+
+    /* 2. Release expired MIDI note gates */
+    for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
+        if (g_synth.active_gates[i].active) {
+            if (--g_synth.active_gates[i].rem_samples <= 0) {
+                g_synth.active_gates[i].active = false;
+                rg35_sf2_note_off(&g_sf2, g_synth.active_gates[i].channel, g_synth.active_gates[i].key);
+            }
+        }
+    }
+
+    if (!playing) return;
+
+    /* 3. Trigger 8th-note step (sub_step=0) or 16th-note midpoint (sub_step=1) */
+    if (g_synth.step_sample_pos == 0) {
+        g_synth.substep_16th_fired = false;
+        trigger_step_voices(g_style_idx, g_cur_bar, g_cur_step, 0);
+    } else if (!g_synth.substep_16th_fired && g_synth.step_sample_pos >= (g_synth.step_sample_len >> 1)) {
+        g_synth.substep_16th_fired = true;
+        trigger_step_voices(g_style_idx, g_cur_bar, g_cur_step, 1);
+    }
+
+    g_synth.step_sample_pos++;
+    if (g_synth.step_sample_pos >= g_synth.step_sample_len) {
+        g_synth.step_sample_pos = 0;
+        int spb   = k_styles[g_style_idx].steps_per_bar;
+        int nbars = k_styles[g_style_idx].num_bars;
+        int next_step = g_cur_step + 1;
+        if (next_step >= spb) {
+            next_step = 0;
+            g_cur_bar = (g_cur_bar + 1) % nbars;
+        }
+        g_cur_step = next_step;
+        g_synth.step_sample_len = compute_step_samples(g_cur_step);
+    }
+}
+
+/* Compute how many samples until the next scheduled sequencer/MIDI event (for sub-block SF2 rendering) */
+static int samples_until_next_event(bool playing, int max_rem) {
+    int n = max_rem;
+    for (int i = 0; i < PB_MAX_PENDING_EV; i++) {
+        if (g_synth.pending_ev[i].used && g_synth.pending_ev[i].delay_samples < n) {
+            n = g_synth.pending_ev[i].delay_samples;
+        }
+    }
+    for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
+        if (g_synth.active_gates[i].active && g_synth.active_gates[i].rem_samples < n) {
+            n = g_synth.active_gates[i].rem_samples;
+        }
+    }
+    if (playing) {
+        if (g_synth.step_sample_pos == 0) return 0;
+        uint32_t half = g_synth.step_sample_len >> 1;
+        if (!g_synth.substep_16th_fired && g_synth.step_sample_pos <= half) {
+            int d = (int)(half - g_synth.step_sample_pos);
+            if (d < n) n = d;
+        }
+        int to_end = (int)(g_synth.step_sample_len - g_synth.step_sample_pos);
+        if (to_end < n) n = to_end;
+    }
+    return (n < 0) ? 0 : n;
+}
+
 static void audio_render_frames(int16_t *out, int frames) {
-    if (!g_playing) {
+    pthread_mutex_lock(&g_audio_mutex);
+
+    bool playing = g_playing;
+    if (!playing && g_synth.was_playing) {
+        sf2_clear_queues();
+    }
+    g_synth.was_playing = playing;
+
+    if (rg35_sf2_ready(&g_sf2)) {
+        /* Sample-accurate sub-block SoundFont 2.01 + Stereo Room Reverb rendering */
+        int pos = 0;
+        while (pos < frames) {
+            int rem = frames - pos;
+            int until = samples_until_next_event(playing, rem);
+            if (until == 0) {
+                sequencer_tick_one_sample(playing);
+                rg35_sf2_render_i16(&g_sf2, out + pos * 2, 1);
+                pos += 1;
+            } else {
+                int chunk = (until < rem) ? until : rem;
+                /* Advance timers across chunk without per-sample branching */
+                for (int i = 0; i < PB_MAX_PENDING_EV; i++) {
+                    if (g_synth.pending_ev[i].used) g_synth.pending_ev[i].delay_samples -= chunk;
+                }
+                for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
+                    if (g_synth.active_gates[i].active) g_synth.active_gates[i].rem_samples -= chunk;
+                }
+                if (playing) {
+                    g_synth.step_sample_pos += (uint32_t)chunk;
+                    if (g_synth.step_sample_pos >= g_synth.step_sample_len) {
+                        g_synth.step_sample_pos = 0;
+                        int spb   = k_styles[g_style_idx].steps_per_bar;
+                        int nbars = k_styles[g_style_idx].num_bars;
+                        int next_step = g_cur_step + 1;
+                        if (next_step >= spb) {
+                            next_step = 0;
+                            g_cur_bar = (g_cur_bar + 1) % nbars;
+                        }
+                        g_cur_step = next_step;
+                        g_synth.step_sample_len = compute_step_samples(g_cur_step);
+                    }
+                }
+                rg35_sf2_render_i16(&g_sf2, out + pos * 2, chunk);
+                pos += chunk;
+            }
+        }
+
+        if (!playing) {
+            g_synth.vu_kick  *= 0.85f;
+            g_synth.vu_snare *= 0.85f;
+            g_synth.vu_hat   *= 0.85f;
+            g_synth.vu_bass  *= 0.85f;
+            g_synth.vu_chord *= 0.85f;
+        } else {
+            g_synth.vu_kick  *= 0.92f;
+            g_synth.vu_snare *= 0.92f;
+            g_synth.vu_hat   *= 0.90f;
+            g_synth.vu_bass  *= 0.93f;
+            g_synth.vu_chord *= 0.92f;
+        }
+        pthread_mutex_unlock(&g_audio_mutex);
+        return;
+    }
+
+    /* Fallback: Physical-Modeling DSP Synthesizer + Stereo Room Reverb */
+    if (!playing) {
         memset(out, 0, (size_t)(frames * AUDIO_CHANNELS * sizeof(int16_t)));
         g_synth.vu_kick  *= 0.85f;
         g_synth.vu_snare *= 0.85f;
         g_synth.vu_hat   *= 0.85f;
         g_synth.vu_bass  *= 0.85f;
         g_synth.vu_chord *= 0.85f;
+        pthread_mutex_unlock(&g_audio_mutex);
         return;
     }
 
@@ -732,22 +1464,7 @@ static void audio_render_frames(int16_t *out, int frames) {
     };
 
     for (int f = 0; f < frames; f++) {
-        if (g_synth.step_sample_pos == 0) {
-            trigger_step_voices(g_style_idx, g_cur_bar, g_cur_step);
-        }
-        g_synth.step_sample_pos++;
-        if (g_synth.step_sample_pos >= g_synth.step_sample_len) {
-            g_synth.step_sample_pos = 0;
-            int spb   = k_styles[g_style_idx].steps_per_bar;
-            int nbars = k_styles[g_style_idx].num_bars;
-            int next_step = g_cur_step + 1;
-            if (next_step >= spb) {
-                next_step = 0;
-                g_cur_bar = (g_cur_bar + 1) % nbars;
-            }
-            g_cur_step = next_step;
-            g_synth.step_sample_len = compute_step_samples(g_cur_step);
-        }
+        sequencer_tick_one_sample(true);
 
         float mix_l = 0.0f;
         float mix_r = 0.0f;
@@ -765,7 +1482,6 @@ static void audio_render_frames(int16_t *out, int frames) {
             if (g_synth.kick_phase >= 1.0f) g_synth.kick_phase -= 1.0f;
 
             float sig = sinf(2.0f * (float)M_PI * g_synth.kick_phase);
-            /* Warm beater transient click */
             if (elapsed < (SAMPLE_RATE * 4) / 1000) {
                 sig += 0.35f * next_white_noise();
             }
@@ -789,7 +1505,6 @@ static void audio_render_frames(int16_t *out, int frames) {
             float body_env = powf(norm, 2.6f);
 
             float wn = next_white_noise();
-            /* Simple resonant snare-wire bandpass filter */
             g_synth.snare_bp_z1 += 0.42f * (wn - g_synth.snare_bp_z1 - 0.35f * g_synth.snare_bp_z2);
             g_synth.snare_bp_z2 += 0.42f * g_synth.snare_bp_z1;
             float wires = g_synth.snare_bp_z1 * (norm * norm);
@@ -832,7 +1547,6 @@ static void audio_render_frames(int16_t *out, int frames) {
             float saw = 2.0f * g_synth.bass_phase - 1.0f;
             float sub = sinf(2.0f * (float)M_PI * g_synth.bass_sub_phase);
 
-            /* 2-pole SVF low-pass filter with envelope-swept cutoff */
             float cutoff_f = 0.045f + 0.14f * (norm * norm * norm);
             float hp = saw - g_synth.bass_svf_lp - 0.65f * g_synth.bass_svf_bp;
             g_synth.bass_svf_bp += cutoff_f * hp;
@@ -863,7 +1577,6 @@ static void audio_render_frames(int16_t *out, int frames) {
                 if (g_synth.chord_phases[v] >= 1.0f) g_synth.chord_phases[v] -= 1.0f;
 
                 float ph = g_synth.chord_phases[v];
-                /* Warm electric guitar / Rhodes tine + 2nd harmonic + gentle pluck filter */
                 float raw = 0.60f * sinf(2.0f * (float)M_PI * ph) +
                             0.28f * sinf(4.0f * (float)M_PI * ph) +
                             0.12f * (2.0f * ph - 1.0f);
@@ -871,7 +1584,7 @@ static void audio_render_frames(int16_t *out, int frames) {
                 g_synth.chord_lp[v] += alpha * (raw - g_synth.chord_lp[v]);
                 float v_out = g_synth.chord_lp[v] * 0.25f;
 
-                float pan = 0.25f + 0.25f * (float)v; /* Spread 4 chord voices across stereo field */
+                float pan = 0.25f + 0.25f * (float)v;
                 ch_l += v_out * (1.0f - pan * 0.55f);
                 ch_r += v_out * (0.45f + pan * 0.55f);
             }
@@ -881,12 +1594,12 @@ static void audio_render_frames(int16_t *out, int frames) {
             g_synth.chord_rem--;
         }
 
-        /* Soft-clip master stereo bus */
-        float out_l = tanhf(mix_l * 1.15f);
-        float out_r = tanhf(mix_r * 1.15f);
+        /* Stereo Freeverb room reverb + 20 Hz DC blocker + soft-clip master limiter */
+        float out_l, out_r;
+        rg35_sf2_fx_sample(&g_sf2, mix_l, mix_r, &out_l, &out_r);
 
-        int32_t il = (int32_t)(out_l * 30000.0f);
-        int32_t ir = (int32_t)(out_r * 30000.0f);
+        int32_t il = (int32_t)(out_l * 31000.0f);
+        int32_t ir = (int32_t)(out_r * 31000.0f);
         if (il >  32767) il =  32767;
         if (il < -32767) il = -32767;
         if (ir >  32767) ir =  32767;
@@ -896,12 +1609,12 @@ static void audio_render_frames(int16_t *out, int frames) {
         out[f * 2 + 1] = (int16_t)ir;
     }
 
-    /* Smooth decay of VU meters */
     g_synth.vu_kick  *= 0.92f;
     g_synth.vu_snare *= 0.92f;
     g_synth.vu_hat   *= 0.90f;
     g_synth.vu_bass  *= 0.93f;
     g_synth.vu_chord *= 0.92f;
+    pthread_mutex_unlock(&g_audio_mutex);
 }
 
 /* ============================================================================
@@ -935,6 +1648,11 @@ typedef void (*pa_simple_free_fn)(pa_simple *);
 static void *audio_thread_worker(void *arg) {
     (void)arg;
     int16_t period_buf[AUDIO_FRAMES * AUDIO_CHANNELS];
+
+    /* Load studio SoundFont (GeneralUser-GS.sf2 -> pocketband.sf2) on background thread */
+    pthread_mutex_lock(&g_audio_mutex);
+    init_sf2_engine();
+    pthread_mutex_unlock(&g_audio_mutex);
 
     /* 1. Try PulseAudio Simple first on Desktop X11 */
     void *pa_lib = NULL;
@@ -1003,6 +1721,11 @@ static void *audio_thread_worker(void *arg) {
     if (pa_lib)             dlclose(pa_lib);
     if (pcm && fn_pcm_close) fn_pcm_close(pcm);
     if (alsa_lib)           dlclose(alsa_lib);
+
+    pthread_mutex_lock(&g_audio_mutex);
+    rg35_sf2_free(&g_sf2);
+    g_sf2_loaded = false;
+    pthread_mutex_unlock(&g_audio_mutex);
     return NULL;
 }
 
@@ -1048,12 +1771,14 @@ static int platform_init(void) {
         }
     }
     init_evdev();
+    rg35xxsp_keepawake_init("pocketband", NULL);
     g_audio_running = true;
     pthread_create(&g_audio_thread, NULL, audio_thread_worker, NULL);
     return 0;
 }
 
 static void platform_present(void) {
+    rg35xxsp_keepawake_tick_now();
     if (!g_fb_mem) return;
     int dst_w   = (int)g_vinfo.xres;
     int dst_h   = (int)g_vinfo.yres;
@@ -1090,6 +1815,10 @@ static uint32_t platform_poll_pressed(void) {
         while (read(g_ev_fds[i], &ev, sizeof(ev)) == sizeof(ev)) {
             if (ev.type == EV_KEY) {
                 uint32_t mask = rg35xxsp_map_evkey(ev.code);
+                if (ev.value == 1) {
+                    if (mask & BTN_LID_CLOSE) { rg35xxsp_keepawake_set_lid_closed(true);  continue; }
+                    if (mask & BTN_LID_OPEN)  { rg35xxsp_keepawake_set_lid_closed(false); continue; }
+                }
                 if (mask) {
                     if (ev.value > 0) g_held_btns |= mask;
                     else              g_held_btns &= ~mask;
@@ -1103,6 +1832,7 @@ static uint32_t platform_poll_pressed(void) {
 }
 
 static void platform_shutdown(void) {
+    rg35xxsp_keepawake_shutdown();
     if (g_audio_running) {
         g_audio_running = false;
         pthread_join(g_audio_thread, NULL);
@@ -1216,6 +1946,7 @@ static void init_default_patterns(void) {
 
 static void apply_style(int style_idx) {
     style_idx = ((style_idx % NUM_STYLES) + NUM_STYLES) % NUM_STYLES;
+    pthread_mutex_lock(&g_audio_mutex);
     g_style_idx = style_idx;
     g_bpm       = k_styles[style_idx].default_bpm;
     g_swing_pct = k_styles[style_idx].swing_pct;
@@ -1226,6 +1957,13 @@ static void apply_style(int style_idx) {
     }
     g_synth.step_sample_pos = 0;
     g_synth.step_sample_len = compute_step_samples(0);
+    g_synth.substep_16th_fired = false;
+    g_synth.prev_voicing_valid = false;
+    sf2_clear_queues();
+    if (rg35_sf2_ready(&g_sf2)) {
+        sf2_configure_style_instruments(style_idx);
+    }
+    pthread_mutex_unlock(&g_audio_mutex);
 }
 
 static void resolve_config_path(void) {
@@ -1670,35 +2408,41 @@ static void render_step_editor_view(void) {
 }
 
 static void render_help_modal(void) {
-    int mx = 20, my = 18, mw = NATIVE_W - 40, mh = NATIVE_H - 36;
+    int mx = 20, my = 12, mw = NATIVE_W - 40, mh = NATIVE_H - 24;
     fill_rect(mx, my, mw, mh, RGB(15, 23, 38));
     draw_border(mx, my, mw, mh, 2, RGB(96, 165, 250));
     draw_border(mx + 3, my + 3, mw - 6, mh - 6, 1, RGB(37, 99, 235));
 
-    fill_rect(mx + 4, my + 4, mw - 8, 40, RGB(28, 39, 60));
-    fill_rect(mx + 4, my + 44, mw - 8, 2, RGB(64, 82, 115));
-    draw_pill(mx + 12, my + 8, 84, 30, RGB(37, 99, 235), RGB(147, 197, 253));
-    draw_text_centered(FONT_UI_13, mx + 12, my + 8, 84, 30, "HELP", RGB(255, 255, 255));
-    draw_text(FONT_UI_20, mx + 108, my + 10, "RG35XXSP POCKETBAND & GROOVE", RGB(248, 250, 252));
+    fill_rect(mx + 4, my + 4, mw - 8, 38, RGB(28, 39, 60));
+    fill_rect(mx + 4, my + 42, mw - 8, 2, RGB(64, 82, 115));
+    draw_pill(mx + 12, my + 8, 76, 28, RGB(37, 99, 235), RGB(147, 197, 253));
+    draw_text_centered(FONT_UI_13, mx + 12, my + 8, 76, 28, "HELP", RGB(255, 255, 255));
+    draw_text(FONT_UI_20, mx + 98, my + 10, "POCKETBAND - QUICK GUIDE & GROOVE", RGB(248, 250, 252));
+
+    fill_rect(mx + 4, my + 44, mw - 8, 22, RGB(19, 29, 48));
+    fill_rect(mx + 4, my + 66, mw - 8, 1, RGB(48, 66, 98));
+    draw_text_centered(FONT_UI_13, mx + 8, my + 44, mw - 16, 22,
+                       "5-track drum, bass & chord backing band with 12-fret guitar soloing map.",
+                       RGB(186, 230, 253));
 
     /* Groove & Feel Box */
-    int gy = my + 54;
-    fill_rect(mx + 14, gy, mw - 28, 72, RGB(23, 33, 52));
-    draw_border(mx + 14, gy, mw - 28, 72, 2, RGB(52, 211, 153));
+    int gy = my + 72;
+    fill_rect(mx + 14, gy, mw - 28, 68, RGB(23, 33, 52));
+    draw_border(mx + 14, gy, mw - 28, 68, 2, RGB(52, 211, 153));
 
     char g1[96];
     snprintf(g1, sizeof(g1), "Style: %s (%d/4)   |   Key: %s   |   %d BPM",
              k_styles[g_style_idx].name, k_styles[g_style_idx].beats_per_bar,
              k_note_names[g_key_pc], g_bpm);
-    draw_text_centered(FONT_UI_16, mx + 14, gy + 10, mw - 28, 24, g1, RGB(250, 204, 21));
+    draw_text_centered(FONT_UI_16, mx + 14, gy + 8, mw - 28, 24, g1, RGB(250, 204, 21));
 
     char g2[96];
     snprintf(g2, sizeof(g2), "[LEFT / RIGHT] Swing: %d%%   |   [A] 4-Bar Auto-Fill: %s",
              g_swing_pct, g_auto_fill ? "ON" : "OFF");
-    draw_text_centered(FONT_UI_13, mx + 14, gy + 40, mw - 28, 20, g2, RGB(167, 243, 208));
+    draw_text_centered(FONT_UI_13, mx + 14, gy + 38, mw - 28, 20, g2, RGB(167, 243, 208));
 
     /* Controls Table */
-    int ky = gy + 84;
+    int ky = gy + 78;
     static const struct {
         const char *btn;
         const char *desc;
@@ -1713,15 +2457,16 @@ static void render_help_modal(void) {
     };
 
     for (int i = 0; i < 7; i++) {
-        int ry = ky + i * 36;
+        int ry = ky + i * 37;
         draw_pill(mx + 16, ry, 136, 28, RGB(30, 58, 95), RGB(71, 98, 145));
         draw_text_centered(FONT_UI_13, mx + 16, ry, 136, 28, k_rows[i].btn, RGB(254, 240, 138));
         draw_text(FONT_UI_13, mx + 164, ry + 6, k_rows[i].desc, RGB(226, 232, 240));
     }
 
-    fill_rect(mx + 4, my + mh - 32, mw - 8, 28, RGB(12, 18, 30));
-    draw_text_centered(FONT_UI_13, mx, my + mh - 30, mw, 24,
-                       "Press [Y] or [B] to close Help  |  [MENU] Save & Exit",
+    fill_rect(mx + 4, my + mh - 34, mw - 8, 30, RGB(12, 18, 30));
+    fill_rect(mx + 4, my + mh - 34, mw - 8, 1, RGB(51, 65, 85));
+    draw_text_centered(FONT_UI_13, mx, my + mh - 32, mw, 26,
+                       "Press [Y] or [B] to close Help   |   [MENU] Save & Exit",
                        RGB(186, 230, 253));
 }
 
@@ -1750,6 +2495,32 @@ int main(int argc, char *argv[]) {
     init_synth();
     resolve_config_path();
     load_config();
+
+    /* Automated Audio Self-Test (--audio-test) */
+    if (argc >= 2 && strcmp(argv[1], "--audio-test") == 0) {
+        init_sf2_engine();
+        g_playing = true;
+        int16_t pcm[AUDIO_FRAMES * AUDIO_CHANNELS];
+        double energy = 0.0;
+        int peak = 0;
+        int total_frames = SAMPLE_RATE; /* 1 second across beats */
+        for (int done = 0; done < total_frames; done += AUDIO_FRAMES) {
+            audio_render_frames(pcm, AUDIO_FRAMES);
+            for (int i = 0; i < AUDIO_FRAMES * AUDIO_CHANNELS; i++) {
+                int v = pcm[i];
+                if (v < 0) v = -v;
+                if (v > peak) peak = v;
+                energy += (double)pcm[i] * (double)pcm[i];
+            }
+        }
+        double rms = sqrt(energy / (double)(total_frames * AUDIO_CHANNELS));
+        printf("pocketband audio-test: sf2=%s path=%s peak=%d rms=%.1f\n",
+               g_sf2_loaded ? "YES" : "NO",
+               g_sf2_loaded ? g_sf2.loaded_path : "(fallback-dsp)",
+               peak, rms);
+        rg35_sf2_free(&g_sf2);
+        return (peak > 100) ? 0 : 1;
+    }
 
     /* Automated Screenshot Mode (--screenshot-states <dir>) */
     if (argc >= 3 && strcmp(argv[1], "--screenshot-states") == 0) {
@@ -1856,12 +2627,16 @@ int main(int argc, char *argv[]) {
             g_view = (g_view == VIEW_JAM) ? VIEW_STEP_EDITOR : VIEW_JAM;
         } else if (g_view == VIEW_JAM) {
             if (pressed & BTN_A) {
+                pthread_mutex_lock(&g_audio_mutex);
                 g_playing = !g_playing;
                 if (g_playing) {
                     g_cur_bar  = 0;
                     g_cur_step = 0;
                     g_synth.step_sample_pos = 0;
+                    g_synth.substep_16th_fired = false;
+                    g_synth.prev_voicing_valid = false;
                 }
+                pthread_mutex_unlock(&g_audio_mutex);
             } else if (pressed & BTN_B) {
                 g_fill_queued = !g_fill_queued;
             } else if (pressed & BTN_RIGHT) {

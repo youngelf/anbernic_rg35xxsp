@@ -6,12 +6,13 @@
  *   running Knulli (Scarab) / Batocera Linux, plus x86_64 Linux desktop X11 host.
  *
  * Controls on Anbernic RG35XX SP & Linux Host:
- *   A Button (Space / 'A')          : Play / Pause metronome (Primary Action)
+ *   A Button (Space / 'A' / 'Z')    : Play / Pause metronome (Primary Action)
  *   B Button (BackSpace / 'B')      : Reset Tempo to 120 BPM (Secondary Action)
- *   D-Pad UP / DOWN                 : Increase / Decrease Tempo (BPM)
+ *   D-Pad UP / DOWN                 : Increase / Decrease Tempo +/-1 BPM (hold for continuous)
  *   D-Pad LEFT / RIGHT              : Cycle Time Signature (4/4, 3/4, 2/4, 5/4, 7/4)
  *   L1 / R1 Shoulder Buttons        : Decrease / Increase Click Drop-Rate by 5% (0%..100%)
- *   Y Button ('Y' on Linux)         : Toggle Help overlay
+ *   L2 Trigger ('1' on Linux)       : Cycle 4 Studio Click Kits (Woodblock, Drum Rim, Classic, Marimba)
+ *   Y Button ('Y' on Linux)         : Toggle English Help overlay
  *   MENU (M) ('Esc' on Linux)       : Save settings & Exit to Knulli
  */
 
@@ -31,6 +32,10 @@
 #include <sys/ioctl.h>
 
 #include "../rg35xxsp_input.h"
+#include "../rg35xxsp_keepawake.h"
+
+#define RG35XXSP_SF2_IMPLEMENTATION
+#include "../rg35xxsp_sf2.h"
 
 /* Virtual canvas is 320x240, scaled 2x to native 640x480 on RG35XX SP & Linux */
 #define CANVAS_W 320
@@ -62,6 +67,7 @@ typedef enum {
     ACT_SIG_PREV,
     ACT_SIG_NEXT,
     ACT_RESET_BPM,
+    ACT_KIT_NEXT,
     ACT_HELP,
     ACT_QUIT
 } InputAction;
@@ -81,104 +87,332 @@ static inline uint32_t make_rgb(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 /* =========================================================================
- * Maximum-Loudness Click Synthesizer (Full-Scale +/-32767 Saturated Harmonic)
+ * Sample-Accurate 44.1 kHz Stereo Background Audio Clock & 4 Studio Click Kits
+ *   - Runs 100% on the background audio thread (zero UI-thread jitter!)
+ *   - 4 Kits (cycled via L2):
+ *       0: STUDIO WOODBLOCK (SF2 Wood Block prog=115 / resonant modal woodblock)
+ *       1: DRUM RIMSHOT     (SF2 Drum Bank 128 Side-Stick + Hi-Hat / rimshot DSP)
+ *       2: CLASSIC CLICK    (High-cut saturated harmonic V90/SP classic click)
+ *       3: WARM MARIMBA     (SF2 Marimba prog=12 / warm harmonic marimba DSP)
  * ========================================================================= */
-static volatile int g_bpm = DEFAULT_BPM;
-static volatile int g_time_sig_idx = 0;
-static volatile int g_drop_pct = 0;     /* Click drop-rate (0% .. 100%, step 5%), starts at 0% */
-static volatile bool g_playing = false;
+#define NUM_CLICK_KITS 4
+typedef enum {
+    KIT_WOODBLOCK = 0,
+    KIT_RIMSHOT   = 1,
+    KIT_CLASSIC   = 2,
+    KIT_MARIMBA   = 3
+} ClickKit;
+
+static const char *k_kit_short_names[NUM_CLICK_KITS] = {
+    "WOODBLOCK",
+    "DRUM RIM",
+    "CLASSIC",
+    "MARIMBA"
+};
 
 #define LOCK_IN_MEASURES 4
+#define ACCENT_CLICK_MS  75
+#define NORMAL_CLICK_MS  55
 
-static volatile int g_click_samples_left = 0;
-static volatile bool g_click_is_accent = false;
-static uint32_t g_click_sample_pos = 0;
+static pthread_mutex_t g_clock_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-#define ACCENT_CLICK_MS 75
-#define NORMAL_CLICK_MS 55
+static volatile int  g_bpm = DEFAULT_BPM;
+static volatile int  g_time_sig_idx = 0;
+static volatile int  g_drop_pct = 0;     /* Click drop-rate (0% .. 100%, step 5%), starts at 0% */
+static volatile int  g_kit_idx = KIT_WOODBLOCK;
+static volatile bool g_playing = false;
 
-static void trigger_click(bool accent) {
-    g_click_is_accent = accent;
-    g_click_sample_pos = 0;
-    int duration_ms = accent ? ACCENT_CLICK_MS : NORMAL_CLICK_MS;
-    g_click_samples_left = (SAMPLE_RATE * duration_ms) / 1000;
+/* Live sample-accurate telemetry published by audio thread for UI */
+static volatile int      g_current_beat = 0;
+static volatile int      g_measure_count = 0;
+static volatile double   g_beat_phase_0to1 = 0.0;
+static volatile uint32_t g_last_beat_trigger_ms = 0;
+
+/* Audio-thread-private clock, SF2 engine, and DSP click voice state */
+static Rg35Sf2Engine g_sf2;
+static bool          g_sf2_init_attempted = false;
+static bool          g_sf2_has_woodblock  = false;
+static bool          g_sf2_has_drums      = false;
+static bool          g_sf2_has_marimba    = false;
+static int           g_sf2_gate_ch        = -1;
+static int           g_sf2_gate_key       = -1;
+static int           g_sf2_gate_rem       = 0;
+
+static double        g_sample_in_beat     = 0.0;
+static uint32_t      g_audio_rng          = 0x6C8E9CF5u;
+
+static int           g_dsp_samples_left   = 0;
+static int           g_dsp_total_samples  = 1;
+static uint32_t      g_dsp_sample_pos     = 0;
+static bool          g_dsp_is_accent      = false;
+static int           g_dsp_kit            = KIT_CLASSIC;
+
+static void init_sf2_in_audio_thread(void) {
+    if (g_sf2_init_attempted) return;
+    g_sf2_init_attempted = true;
+    /* Crisp, subtle studio room ambience (reverb_wet=0.14) so clicks stay super tight */
+    if (rg35_sf2_init(&g_sf2, SAMPLE_RATE, 24, 0.14f, 1.38f)) {
+        int wb_idx = tsf_get_presetindex(g_sf2.synth, 0, 115); /* Wood Block */
+        if (wb_idx >= 0) {
+            tsf_channel_set_presetindex(g_sf2.synth, 0, wb_idx);
+            rg35_sf2_set_channel_pan_vol(&g_sf2, 0, 0.50f, 1.0f);
+            g_sf2_has_woodblock = true;
+        }
+        int mar_idx = tsf_get_presetindex(g_sf2.synth, 0, 12); /* Marimba */
+        if (mar_idx < 0) mar_idx = tsf_get_presetindex(g_sf2.synth, 0, 11); /* Vibraphone */
+        if (mar_idx >= 0) {
+            tsf_channel_set_presetindex(g_sf2.synth, 1, mar_idx);
+            rg35_sf2_set_channel_pan_vol(&g_sf2, 1, 0.50f, 0.96f);
+            g_sf2_has_marimba = true;
+        }
+        int drm_idx = tsf_get_presetindex(g_sf2.synth, 128, 0); /* Standard Drum Kit */
+        if (drm_idx >= 0) {
+            tsf_channel_set_presetindex(g_sf2.synth, 9, drm_idx);
+            rg35_sf2_set_channel_pan_vol(&g_sf2, 9, 0.50f, 1.0f);
+            g_sf2_has_drums = true;
+        }
+    }
 }
 
-/* Play click unless dropped:
+static void fire_click_voice_locked(bool accent, int kit) {
+    init_sf2_in_audio_thread();
+    if (rg35_sf2_ready(&g_sf2)) {
+        if (g_sf2_gate_rem > 0 && g_sf2_gate_ch >= 0) {
+            rg35_sf2_note_off(&g_sf2, g_sf2_gate_ch, g_sf2_gate_key);
+            g_sf2_gate_rem = 0;
+        }
+        if (kit == KIT_WOODBLOCK && g_sf2_has_woodblock) {
+            int key = accent ? 80 : 73;
+            rg35_sf2_note_on(&g_sf2, 0, key, accent ? 0.98f : 0.80f);
+            g_sf2_gate_ch  = 0;
+            g_sf2_gate_key = key;
+            g_sf2_gate_rem = (SAMPLE_RATE * 130) / 1000;
+            g_dsp_samples_left = 0;
+            return;
+        }
+        if (kit == KIT_RIMSHOT && g_sf2_has_drums) {
+            if (accent) {
+                rg35_sf2_note_on(&g_sf2, 9, 37, 0.98f); /* Side Stick / Rimshot */
+                rg35_sf2_note_on(&g_sf2, 9, 42, 0.72f); /* Crisp Closed Hi-Hat layer */
+            } else {
+                rg35_sf2_note_on(&g_sf2, 9, 42, 0.88f); /* Closed Hi-Hat */
+                rg35_sf2_note_on(&g_sf2, 9, 37, 0.42f); /* Soft Rim body */
+            }
+            g_dsp_samples_left = 0;
+            return;
+        }
+        if (kit == KIT_MARIMBA && g_sf2_has_marimba) {
+            int key = accent ? 79 : 72; /* G5 accent / C5 normal */
+            rg35_sf2_note_on(&g_sf2, 1, key, accent ? 0.96f : 0.78f);
+            g_sf2_gate_ch  = 1;
+            g_sf2_gate_key = key;
+            g_sf2_gate_rem = (SAMPLE_RATE * 140) / 1000;
+            g_dsp_samples_left = 0;
+            return;
+        }
+    }
+
+    /* High-quality DSP synthesis (Classic Click + studio fallbacks for Woodblock/Rim/Marimba) */
+    g_dsp_kit = kit;
+    g_dsp_is_accent = accent;
+    g_dsp_sample_pos = 0;
+    int dur_ms = (kit == KIT_MARIMBA) ? (accent ? 95 : 75) : (accent ? ACCENT_CLICK_MS : NORMAL_CLICK_MS);
+    g_dsp_total_samples = (SAMPLE_RATE * dur_ms) / 1000;
+    g_dsp_samples_left  = g_dsp_total_samples;
+}
+
+/* Play click unless dropped (called inside audio thread under g_clock_mutex):
  * - First 4 measures (measure_count < 4) always play 100% of clicks to lock in the beat.
- * - Thereafter, drop clicks with probability g_drop_pct% (UI updates normally, sound omitted).
+ * - Thereafter, drop clicks with probability drop_pct% (UI updates normally, sound omitted).
  */
-static void maybe_trigger_click(bool accent, int measure_count, int drop_pct) {
+static void maybe_fire_click_locked(bool accent, int measure_count, int drop_pct, int kit) {
     if (measure_count < LOCK_IN_MEASURES || drop_pct <= 0) {
-        trigger_click(accent);
+        fire_click_voice_locked(accent, kit);
         return;
     }
     if (drop_pct >= 100) {
         return;
     }
-    if ((rand() % 100) >= drop_pct) {
-        trigger_click(accent);
+    g_audio_rng = g_audio_rng * 1664525u + 1013904223u;
+    int r = (int)((g_audio_rng >> 16) & 0x7FFFu) % 100;
+    if (r >= drop_pct) {
+        fire_click_voice_locked(accent, kit);
     }
+}
+
+static float synthesize_dsp_click_sample(int kit, bool accent, uint32_t pos, int total_len) {
+    double progress = (double)pos / (double)(total_len > 0 ? total_len : 1);
+    double gain = accent ? 0.92 : 0.70;
+
+    if (kit == KIT_CLASSIC) {
+        double sustain_frac = accent ? 0.70 : 0.65;
+        double env = 1.0;
+        if (progress > sustain_frac) {
+            env = (1.0 - progress) / (1.0 - sustain_frac);
+        }
+        double freq = accent ? 1760.0 : 1000.0;
+        if (pos < (uint32_t)((SAMPLE_RATE * 5) / 1000)) freq *= 1.35;
+        double phase = (2.0 * 3.14159265358979323846 * freq * (double)pos) / (double)SAMPLE_RATE;
+        double raw = sin(phase) + 0.65 * sin(phase * 2.0) + 0.45 * sin(phase * 3.0);
+        if (accent) raw += 0.50 * sin(phase * 0.5);
+        double driven = raw * 3.5;
+        if (driven > 1.0) driven = 1.0;
+        if (driven < -1.0) driven = -1.0;
+        return (float)(driven * env * gain);
+    } else if (kit == KIT_WOODBLOCK) {
+        double env = exp(-5.4 * progress);
+        double base_freq = accent ? 980.0 : 660.0;
+        double pitch_drop = 1.0 + 0.45 * exp(-32.0 * progress);
+        double phase = (2.0 * 3.14159265358979323846 * base_freq * pitch_drop * (double)pos) / (double)SAMPLE_RATE;
+        double body = sin(phase) + 0.42 * sin(phase * 2.41) * exp(-9.0 * progress);
+        return (float)(body * env * gain);
+    } else if (kit == KIT_RIMSHOT) {
+        double env = exp(-6.5 * progress);
+        double freq = accent ? 1480.0 : 900.0;
+        double phase = (2.0 * 3.14159265358979323846 * freq * (double)pos) / (double)SAMPLE_RATE;
+        uint32_t h = pos * 1103515245u + 12345u;
+        double noise = ((double)((h >> 16) & 0x7FFFu) / 16384.0) - 1.0;
+        double snap = exp(-22.0 * progress);
+        double mix = 0.72 * sin(phase) + 0.55 * noise * snap;
+        return (float)(mix * env * gain);
+    } else {
+        /* Warm Marimba / Resonant Bar */
+        double attack = (double)pos / ((double)SAMPLE_RATE * 0.003);
+        if (attack > 1.0) attack = 1.0;
+        double decay = exp(-4.0 * progress);
+        double freq = accent ? 783.99 : 523.25; /* G5 / C5 */
+        double phase = (2.0 * 3.14159265358979323846 * freq * (double)pos) / (double)SAMPLE_RATE;
+        double bar = sin(phase) + 0.28 * sin(phase * 4.0) * exp(-14.0 * progress);
+        return (float)(bar * attack * decay * gain);
+    }
+}
+
+static void metronome_start_or_reset_beat(bool start_playing) {
+    pthread_mutex_lock(&g_clock_mutex);
+    g_playing = start_playing;
+    if (start_playing) {
+        g_current_beat = 0;
+        g_measure_count = 0;
+        g_sample_in_beat = 0.0;
+        g_beat_phase_0to1 = 0.0;
+        g_last_beat_trigger_ms = get_ticks_ms();
+        maybe_fire_click_locked(true, 0, g_drop_pct, g_kit_idx);
+    } else {
+        g_dsp_samples_left = 0;
+        g_beat_phase_0to1 = 0.0;
+        if (rg35_sf2_ready(&g_sf2)) {
+            rg35_sf2_all_notes_off(&g_sf2);
+            g_sf2_gate_rem = 0;
+        }
+    }
+    pthread_mutex_unlock(&g_clock_mutex);
+}
+
+static void metronome_preview_kit(void) {
+    pthread_mutex_lock(&g_clock_mutex);
+    if (!g_playing) {
+        fire_click_voice_locked(true, g_kit_idx);
+    }
+    pthread_mutex_unlock(&g_clock_mutex);
 }
 
 static void audio_callback(void *userdata, uint8_t *stream, int len) {
     (void)userdata;
-    int16_t *samples = (int16_t *)stream;
+    int16_t *out = (int16_t *)stream;
     int frames = len / (2 * AUDIO_CHANNELS);
+    if (frames <= 0) return;
 
-    for (int i = 0; i < frames; i++) {
-        int rem = g_click_samples_left;
-        if (rem > 0) {
-            bool accent = g_click_is_accent;
-            uint32_t pos = g_click_sample_pos++;
-            g_click_samples_left = rem - 1;
+    pthread_mutex_lock(&g_clock_mutex);
+    init_sf2_in_audio_thread();
 
-            int total_click_len = (SAMPLE_RATE * (accent ? ACCENT_CLICK_MS : NORMAL_CLICK_MS)) / 1000;
-            double progress = (double)pos / (double)total_click_len;
+    bool playing = g_playing;
+    int bpm = g_bpm;
+    if (bpm < MIN_BPM) bpm = MIN_BPM;
+    if (bpm > MAX_BPM) bpm = MAX_BPM;
+    int beats_per_bar = k_time_sig_beats[g_time_sig_idx];
+    double samples_per_beat = ((double)SAMPLE_RATE * 60.0) / (double)bpm;
+    int drop_pct = g_drop_pct;
+    int kit = g_kit_idx;
+    bool sf2_ok = rg35_sf2_ready(&g_sf2);
 
-            /* Sustained full-power envelope: hold at 100% full scale for the first
-             * 70% (accent) or 65% (normal) of the click, then decay crisply */
-            double sustain_frac = accent ? 0.70 : 0.65;
-            double env = 1.0;
-            if (progress > sustain_frac) {
-                env = (1.0 - progress) / (1.0 - sustain_frac);
+    float sf2_buf[1024 * 2];
+    int pos = 0;
+    while (pos < frames) {
+        int rem = frames - pos;
+        if (rem > 1024) rem = 1024;
+
+        /* Compute exact samples until next beat boundary or SF2 gate release */
+        int chunk = rem;
+        if (playing) {
+            double to_beat = samples_per_beat - g_sample_in_beat;
+            int ib = (int)ceil(to_beat);
+            if (ib < 1) ib = 1;
+            if (ib < chunk) chunk = ib;
+        }
+        if (g_sf2_gate_rem > 0 && g_sf2_gate_rem < chunk) {
+            chunk = g_sf2_gate_rem;
+        }
+
+        if (sf2_ok) {
+            tsf_render_float(g_sf2.synth, sf2_buf, chunk, 0);
+        }
+
+        for (int i = 0; i < chunk; i++) {
+            float in_l = sf2_ok ? sf2_buf[i * 2]     : 0.0f;
+            float in_r = sf2_ok ? sf2_buf[i * 2 + 1] : 0.0f;
+
+            if (g_dsp_samples_left > 0) {
+                float s = synthesize_dsp_click_sample(g_dsp_kit, g_dsp_is_accent,
+                                                      g_dsp_sample_pos++, g_dsp_total_samples);
+                g_dsp_samples_left--;
+                in_l += s;
+                in_r += s;
             }
 
-            /* Frequencies tuned to handheld speaker resonant peak (1-3 kHz):
-             * Beat 1 Accent: 1760 Hz (A6) + 880 Hz body + 2640 Hz harmonic
-             * Normal Beat  : 1000 Hz + 2000 Hz octave + 3000 Hz edge */
-            double freq = accent ? 1760.0 : 1000.0;
-            if (pos < (SAMPLE_RATE * 5) / 1000) {
-                freq *= 1.35;
-            }
+            float ol, or_;
+            rg35_sf2_fx_sample(&g_sf2, in_l, in_r, &ol, &or_);
+            int32_t sl = (int32_t)(ol * 31800.0f);
+            int32_t sr = (int32_t)(or_ * 31800.0f);
+            if (sl >  32767) sl =  32767; else if (sl < -32767) sl = -32767;
+            if (sr >  32767) sr =  32767; else if (sr < -32767) sr = -32767;
+            out[(pos + i) * 2 + 0] = (int16_t)sl;
+            out[(pos + i) * 2 + 1] = (int16_t)sr;
+        }
 
-            double phase = (2.0 * 3.14159265358979323846 * freq * (double)pos) / (double)SAMPLE_RATE;
-
-            /* High-RMS saturated square-harmonic wave (drives rail-to-rail +/-32767) */
-            double raw = sin(phase) + 0.65 * sin(phase * 2.0) + 0.45 * sin(phase * 3.0);
-            if (accent) {
-                raw += 0.50 * sin(phase * 0.5);
-            }
-
-            /* Hard overdrive saturation (3.5x gain before clamp) for maximum RMS loudness */
-            double driven = raw * 3.5;
-            if (driven > 1.0)  driven = 1.0;
-            if (driven < -1.0) driven = -1.0;
-
-            int32_t val = (int32_t)(driven * 32767.0 * env);
-            if (val > 32767)  val = 32767;
-            if (val < -32767) val = -32767;
-
-            int16_t s = (int16_t)val;
-            for (int c = 0; c < AUDIO_CHANNELS; c++) {
-                samples[i * AUDIO_CHANNELS + c] = s;
-            }
-        } else {
-            for (int c = 0; c < AUDIO_CHANNELS; c++) {
-                samples[i * AUDIO_CHANNELS + c] = 0;
+        if (g_sf2_gate_rem > 0) {
+            g_sf2_gate_rem -= chunk;
+            if (g_sf2_gate_rem <= 0) {
+                g_sf2_gate_rem = 0;
+                if (sf2_ok && g_sf2_gate_ch >= 0) {
+                    rg35_sf2_note_off(&g_sf2, g_sf2_gate_ch, g_sf2_gate_key);
+                }
             }
         }
+
+        if (playing) {
+            g_sample_in_beat += (double)chunk;
+            if (g_sample_in_beat >= samples_per_beat) {
+                g_sample_in_beat -= samples_per_beat;
+                int next_beat = (g_current_beat + 1) % beats_per_bar;
+                g_current_beat = next_beat;
+                if (next_beat == 0) {
+                    g_measure_count++;
+                }
+                g_last_beat_trigger_ms = get_ticks_ms();
+                maybe_fire_click_locked(next_beat == 0, g_measure_count, drop_pct, kit);
+            }
+        }
+        pos += chunk;
     }
+
+    if (playing && samples_per_beat > 0.0) {
+        double p = g_sample_in_beat / samples_per_beat;
+        if (p < 0.0) p = 0.0;
+        if (p > 1.0) p = 1.0;
+        g_beat_phase_0to1 = p;
+    }
+
+    pthread_mutex_unlock(&g_clock_mutex);
 }
 
 static bool g_up_held = false;
@@ -195,6 +429,7 @@ static InputAction mask_to_action(uint32_t mask) {
     if (mask & BTN_RIGHT) return ACT_SIG_NEXT;
     if (mask & BTN_L1)    return ACT_DROP_DOWN;
     if (mask & BTN_R1)    return ACT_DROP_UP;
+    if (mask & BTN_L2)    return ACT_KIT_NEXT;
     return ACT_NONE;
 }
 
@@ -255,9 +490,9 @@ static void *host_audio_worker(void *arg) {
         }
     }
 
-    int chunk_frames = 512;
+    int chunk_frames = 256;
     int chunk_bytes = chunk_frames * AUDIO_CHANNELS * 2;
-    int16_t buf[512 * AUDIO_CHANNELS];
+    int16_t buf[256 * AUDIO_CHANNELS];
 
     while (g_audio_running) {
         audio_callback(NULL, (uint8_t *)buf, chunk_bytes);
@@ -369,6 +604,7 @@ static void platform_shutdown(void) {
         g_audio_running = false;
         pthread_join(g_audio_thread, NULL);
     }
+    rg35_sf2_free(&g_sf2);
     if (g_x11_img) {
         XDestroyImage(g_x11_img);
         g_x11_img = NULL;
@@ -498,9 +734,9 @@ static void *alsa_audio_worker(void *arg) {
     }
     fn_params(pcm, 2, 3, AUDIO_CHANNELS, SAMPLE_RATE, 1, 25000);
 
-    int chunk_frames = 512;
+    int chunk_frames = 256;
     int chunk_bytes = chunk_frames * AUDIO_CHANNELS * 2;
-    int16_t buf[512 * AUDIO_CHANNELS];
+    int16_t buf[256 * AUDIO_CHANNELS];
 
     while (g_alsa_running) {
         audio_callback(NULL, (uint8_t *)buf, chunk_bytes);
@@ -606,7 +842,7 @@ static bool platform_init(void) {
                     desired.freq = SAMPLE_RATE;
                     desired.format = SDL2_AUDIO_S16LSB;
                     desired.channels = AUDIO_CHANNELS;
-                    desired.samples = 512;
+                    desired.samples = 256;
                     desired.callback = audio_callback;
                     if (fn_SDL_OpenAudio(&desired, NULL) == 0) {
                         fn_SDL_PauseAudio(0);
@@ -629,10 +865,12 @@ static bool platform_init(void) {
         pthread_create(&g_alsa_thread, NULL, alsa_audio_worker, NULL);
     }
 
+    rg35xxsp_keepawake_init("metronome", g_sdl2_lib);
     return true;
 }
 
 static void platform_present(const uint32_t *canvas) {
+    rg35xxsp_keepawake_tick_now();
     /* Scale 320x240 canvas 2x to 640x480 */
     for (int y = 0; y < CANVAS_H; y++) {
         for (int x = 0; x < CANVAS_W; x++) {
@@ -698,6 +936,10 @@ static InputAction platform_poll_input(void) {
         while (read(g_evdev_fds[i], &ie, sizeof(ie)) == (ssize_t)sizeof(ie)) {
             if (ie.type == EV_KEY) {
                 uint32_t mask = rg35xxsp_map_evkey(ie.code);
+                if (ie.value == 1) {
+                    if (mask & BTN_LID_CLOSE) { rg35xxsp_keepawake_set_lid_closed(true);  continue; }
+                    if (mask & BTN_LID_OPEN)  { rg35xxsp_keepawake_set_lid_closed(false); continue; }
+                }
                 if (ie.value == 0) {
                     if (mask & BTN_UP)   g_up_held = false;
                     if (mask & BTN_DOWN) g_down_held = false;
@@ -730,6 +972,7 @@ static InputAction platform_poll_input(void) {
 }
 
 static void platform_shutdown(void) {
+    rg35xxsp_keepawake_shutdown();
     if (g_use_sdl2_audio && fn_SDL_CloseAudio) {
         fn_SDL_CloseAudio();
     }
@@ -737,6 +980,7 @@ static void platform_shutdown(void) {
         g_alsa_running = false;
         pthread_join(g_alsa_thread, NULL);
     }
+    rg35_sf2_free(&g_sf2);
     if (g_use_sdl2_video) {
         if (g_sdl2_tex && fn_SDL_DestroyTexture) fn_SDL_DestroyTexture(g_sdl2_tex);
         if (g_sdl2_ren && fn_SDL_DestroyRenderer) fn_SDL_DestroyRenderer(g_sdl2_ren);
@@ -914,6 +1158,9 @@ static void load_config(void) {
         } else if (strncmp(line, "time_sig_idx=", 13) == 0) {
             int val = parse_int(line + 13);
             if (val >= 0 && val < NUM_TIME_SIGS) g_time_sig_idx = val;
+        } else if (strncmp(line, "kit_idx=", 8) == 0) {
+            int val = parse_int(line + 8);
+            if (val >= 0 && val < NUM_CLICK_KITS) g_kit_idx = val;
         }
     }
     fclose(f);
@@ -924,6 +1171,7 @@ static void save_config(void) {
     if (!f) return;
     fprintf(f, "bpm=%d\n", g_bpm);
     fprintf(f, "time_sig_idx=%d\n", g_time_sig_idx);
+    fprintf(f, "kit_idx=%d\n", g_kit_idx);
     fflush(f);
     fsync(fileno(f));
     fclose(f);
@@ -981,11 +1229,19 @@ static void draw_text_centered(uint32_t *canvas, int cx, int y, const char *str,
 
 int main(int argc, char *argv[]) {
     bool dump_promo_mode = false;
+    bool dump_help_mode = false;
+    bool audio_test_mode = false;
     const char *dump_prefix = NULL;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dump-promo") == 0 && i + 1 < argc) {
             dump_promo_mode = true;
             dump_prefix = argv[++i];
+        } else if (strcmp(argv[i], "--dump-help") == 0 && i + 1 < argc) {
+            dump_promo_mode = true;
+            dump_help_mode = true;
+            dump_prefix = argv[++i];
+        } else if (strcmp(argv[i], "--audio-test") == 0) {
+            audio_test_mode = true;
         }
     }
 
@@ -993,6 +1249,40 @@ int main(int argc, char *argv[]) {
     resolve_config_path();
     load_config();
     g_drop_pct = 0; /* Always start at 0% drop-rate so all clicks are played */
+
+    if (audio_test_mode) {
+        g_bpm = 120;
+        g_time_sig_idx = 0;
+        g_drop_pct = 0;
+        int16_t pcm[256 * AUDIO_CHANNELS];
+        int all_ok = 1;
+        for (int k = 0; k < NUM_CLICK_KITS; k++) {
+            g_kit_idx = k;
+            metronome_start_or_reset_beat(true);
+            double energy = 0.0;
+            int peak = 0;
+            int total_frames = SAMPLE_RATE / 2;
+            for (int done = 0; done < total_frames; done += 256) {
+                audio_callback(NULL, (uint8_t *)pcm, (int)sizeof(pcm));
+                for (int i = 0; i < 256 * AUDIO_CHANNELS; i++) {
+                    int v = pcm[i];
+                    if (v < 0) v = -v;
+                    if (v > peak) peak = v;
+                    energy += (double)pcm[i] * (double)pcm[i];
+                }
+            }
+            double rms = sqrt(energy / (double)(total_frames * AUDIO_CHANNELS));
+            printf("metronome audio-test kit=%s sf2=%s path=%s peak=%d rms=%.1f beat=%d\n",
+                   k_kit_short_names[k],
+                   rg35_sf2_ready(&g_sf2) ? "YES" : "NO",
+                   rg35_sf2_ready(&g_sf2) ? g_sf2.loaded_path : "(dsp)",
+                   peak, rms, g_current_beat);
+            if (peak <= 100) all_ok = 0;
+        }
+        metronome_start_or_reset_beat(false);
+        rg35_sf2_free(&g_sf2);
+        return all_ok ? 0 : 1;
+    }
 
     if (!dump_promo_mode && !platform_init()) {
         return 1;
@@ -1015,10 +1305,6 @@ int main(int argc, char *argv[]) {
 
     bool running = true;
     bool show_help = false;
-    int current_beat = 0;  /* 0 .. beats_per_bar - 1 */
-    int measure_count = 0; /* Measures elapsed since start (0..3 = 4-measure lock-in) */
-    double next_beat_time_ms = 0.0;
-    uint32_t last_beat_trigger_ms = 0;
     uint32_t hold_start_ms = 0;
     uint32_t last_repeat_ms = 0;
 
@@ -1028,96 +1314,85 @@ int main(int argc, char *argv[]) {
         if (!dump_promo_mode) {
             InputAction act;
             while ((act = platform_poll_input()) != ACT_NONE) {
-            if (act == ACT_QUIT) {
-                running = false;
-                break;
-            }
-            if (act == ACT_HELP) {
-                show_help = !show_help;
-                continue;
-            }
-            if (show_help) {
-                if (act == ACT_PLAY_PAUSE || act == ACT_RESET_BPM) {
-                    show_help = false;
+                if (act == ACT_QUIT) {
+                    running = false;
+                    break;
                 }
-                continue;
+                if (act == ACT_HELP) {
+                    show_help = !show_help;
+                    continue;
+                }
+                if (show_help) {
+                    if (act == ACT_PLAY_PAUSE || act == ACT_RESET_BPM) {
+                        show_help = false;
+                    }
+                    continue;
+                }
+
+                switch (act) {
+                    case ACT_PLAY_PAUSE:
+                        metronome_start_or_reset_beat(!g_playing);
+                        break;
+
+                    case ACT_BPM_UP:
+                        hold_start_ms  = now_ms;
+                        last_repeat_ms = now_ms;
+                        if (g_bpm < MAX_BPM) {
+                            g_bpm++;
+                        }
+                        break;
+
+                    case ACT_BPM_DOWN:
+                        hold_start_ms  = now_ms;
+                        last_repeat_ms = now_ms;
+                        if (g_bpm > MIN_BPM) {
+                            g_bpm--;
+                        }
+                        break;
+
+                    case ACT_DROP_UP:
+                        g_drop_pct += 5;
+                        if (g_drop_pct > 100) g_drop_pct = 100;
+                        break;
+
+                    case ACT_DROP_DOWN:
+                        g_drop_pct -= 5;
+                        if (g_drop_pct < 0) g_drop_pct = 0;
+                        break;
+
+                    case ACT_SIG_PREV:
+                        g_time_sig_idx = (g_time_sig_idx + NUM_TIME_SIGS - 1) % NUM_TIME_SIGS;
+                        if (g_playing) {
+                            metronome_start_or_reset_beat(true);
+                        } else {
+                            g_current_beat = 0;
+                            g_measure_count = 0;
+                        }
+                        break;
+
+                    case ACT_SIG_NEXT:
+                        g_time_sig_idx = (g_time_sig_idx + 1) % NUM_TIME_SIGS;
+                        if (g_playing) {
+                            metronome_start_or_reset_beat(true);
+                        } else {
+                            g_current_beat = 0;
+                            g_measure_count = 0;
+                        }
+                        break;
+
+                    case ACT_RESET_BPM:
+                        g_bpm = DEFAULT_BPM;
+                        break;
+
+                    case ACT_KIT_NEXT:
+                        g_kit_idx = (g_kit_idx + 1) % NUM_CLICK_KITS;
+                        metronome_preview_kit();
+                        break;
+
+                    default:
+                        break;
+                }
             }
-
-            switch (act) {
-                case ACT_PLAY_PAUSE:
-                    g_playing = !g_playing;
-                    if (g_playing) {
-                        current_beat = 0;
-                        measure_count = 0;
-                        maybe_trigger_click(true, measure_count, g_drop_pct);
-                        last_beat_trigger_ms = now_ms;
-                        next_beat_time_ms = (double)now_ms + (60000.0 / (double)g_bpm);
-                    } else {
-                        g_click_samples_left = 0;
-                    }
-                    break;
-
-                case ACT_BPM_UP:
-                    hold_start_ms  = now_ms;
-                    last_repeat_ms = now_ms;
-                    if (g_bpm < MAX_BPM) {
-                        g_bpm++;
-                        save_config();
-                    }
-                    break;
-
-                case ACT_BPM_DOWN:
-                    hold_start_ms  = now_ms;
-                    last_repeat_ms = now_ms;
-                    if (g_bpm > MIN_BPM) {
-                        g_bpm--;
-                        save_config();
-                    }
-                    break;
-
-                case ACT_DROP_UP:
-                    g_drop_pct += 5;
-                    if (g_drop_pct > 100) g_drop_pct = 100;
-                    break;
-
-                case ACT_DROP_DOWN:
-                    g_drop_pct -= 5;
-                    if (g_drop_pct < 0) g_drop_pct = 0;
-                    break;
-
-                case ACT_SIG_PREV:
-                    g_time_sig_idx = (g_time_sig_idx + NUM_TIME_SIGS - 1) % NUM_TIME_SIGS;
-                    current_beat = 0;
-                    measure_count = 0;
-                    if (g_playing) {
-                        maybe_trigger_click(true, measure_count, g_drop_pct);
-                        last_beat_trigger_ms = now_ms;
-                        next_beat_time_ms = (double)now_ms + (60000.0 / (double)g_bpm);
-                    }
-                    save_config();
-                    break;
-
-                case ACT_SIG_NEXT:
-                    g_time_sig_idx = (g_time_sig_idx + 1) % NUM_TIME_SIGS;
-                    current_beat = 0;
-                    measure_count = 0;
-                    if (g_playing) {
-                        maybe_trigger_click(true, measure_count, g_drop_pct);
-                        last_beat_trigger_ms = now_ms;
-                        next_beat_time_ms = (double)now_ms + (60000.0 / (double)g_bpm);
-                    }
-                    save_config();
-                    break;
-
-                case ACT_RESET_BPM:
-                    g_bpm = DEFAULT_BPM;
-                    save_config();
-                    break;
-
-                default:
-                    break;
-            }
-        }
 
             /* Continuous tempo change when D-Pad UP or DOWN is held */
             if (!show_help && (g_up_held || g_down_held)) {
@@ -1127,10 +1402,8 @@ int main(int argc, char *argv[]) {
                     last_repeat_ms = now_ms;
                     if (g_up_held && g_bpm < MAX_BPM) {
                         g_bpm++;
-                        save_config();
                     } else if (g_down_held && g_bpm > MIN_BPM) {
                         g_bpm--;
-                        save_config();
                     }
                 }
             }
@@ -1139,30 +1412,19 @@ int main(int argc, char *argv[]) {
             g_time_sig_idx = 0;
             g_drop_pct = 15;
             g_playing = true;
-            current_beat = 0;
-            last_beat_trigger_ms = now_ms - 50;
+            g_current_beat = 0;
+            g_beat_phase_0to1 = 0.12;
+            g_last_beat_trigger_ms = now_ms - 50;
+            show_help = dump_help_mode;
         }
 
-        /* Metronome Beat Scheduler */
+        /* Read sample-accurate beat state published by background audio thread */
         now_ms = get_ticks_ms();
         int beats_per_bar = k_time_sig_beats[g_time_sig_idx];
+        int current_beat = g_current_beat % beats_per_bar;
+        double beat_phase = g_beat_phase_0to1;
+        uint32_t last_beat_trigger_ms = g_last_beat_trigger_ms;
         double interval_ms = 60000.0 / (double)g_bpm;
-
-        if (g_playing) {
-            if ((double)now_ms >= next_beat_time_ms) {
-                current_beat = (current_beat + 1) % beats_per_bar;
-                if (current_beat == 0) {
-                    measure_count++;
-                }
-                bool is_accent = (current_beat == 0);
-                maybe_trigger_click(is_accent, measure_count, g_drop_pct);
-                last_beat_trigger_ms = now_ms;
-                next_beat_time_ms += interval_ms;
-                if ((double)now_ms - next_beat_time_ms > interval_ms) {
-                    next_beat_time_ms = (double)now_ms + interval_ms;
-                }
-            }
-        }
 
         /* =================================================================
          * Render UI (320x240 logical canvas -> upscaled 2x to 640x480)
@@ -1245,21 +1507,18 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        /* Single drop% indicator below the beat markings */
-        char drop_str[32];
-        snprintf(drop_str, sizeof(drop_str), "DROP: %d%%", g_drop_pct);
-        draw_text_centered(canvas, CANVAS_W / 2, 183, drop_str, 1,
-                           (g_drop_pct > 0) ? col_gold : col_muted);
+        /* Drop% & Studio Click Kit indicator below beat markings */
+        char status_str[48];
+        snprintf(status_str, sizeof(status_str), "DROP: %d%%   |   L2: %s",
+                 g_drop_pct, k_kit_short_names[g_kit_idx % NUM_CLICK_KITS]);
+        draw_text_centered(canvas, CANVAS_W / 2, 183, status_str, 1,
+                           (g_drop_pct > 0) ? col_gold : col_cyan);
 
         /* Pendulum / Phase Progress Bar inside Beat Panel (y: 195..201) */
         int pbar_x = 24, pbar_y = 195, pbar_w = 272, pbar_h = 6;
         draw_rect(canvas, pbar_x, pbar_y, pbar_w, pbar_h, col_bg);
-        if (g_playing && interval_ms > 0.0) {
-            double elapsed = (double)(now_ms - last_beat_trigger_ms);
-            double phase = elapsed / interval_ms;
-            if (phase < 0.0) phase = 0.0;
-            if (phase > 1.0) phase = 1.0;
-            double pos_norm = (current_beat % 2 == 0) ? phase : (1.0 - phase);
+        if (g_playing) {
+            double pos_norm = (current_beat % 2 == 0) ? beat_phase : (1.0 - beat_phase);
             int knob_w = 20;
             int knob_x = pbar_x + (int)(pos_norm * (double)(pbar_w - knob_w));
             uint32_t knob_col = (current_beat == 0 && beat_flash) ? col_accent : col_cyan;
@@ -1270,26 +1529,42 @@ int main(int argc, char *argv[]) {
         draw_rect(canvas, 0, 214, CANVAS_W, 26, col_panel_dark);
         draw_rect(canvas, 0, 214, CANVAS_W, 1, col_border);
         draw_text_centered(canvas, CANVAS_W / 2, 223,
-                           "A:PLAY  B:120  UP/DN:BPM  L/R:SIG  Y:HELP  MENU:EXIT", 1, col_muted);
+                           "A:PLAY  B:120  L2:KIT  L1/R1:DROP  Y:HELP  MENU:EXIT", 1, col_muted);
 
         /* 5. Help Modal Overlay (toggled with Y) */
         if (show_help) {
-            draw_rect(canvas, 16, 20, 288, 200, col_panel_dark);
-            draw_border(canvas, 16, 20, 288, 200, 2, col_gold);
-            draw_rect(canvas, 18, 22, 284, 24, col_panel);
-            draw_text_centered(canvas, CANVAS_W / 2, 27, "METRONOME CONTROLS", 2, col_gold);
+            draw_rect(canvas, 8, 6, 304, 228, col_panel_dark);
+            draw_border(canvas, 8, 6, 304, 228, 2, col_gold);
+            draw_rect(canvas, 10, 8, 300, 22, col_panel);
+            draw_text_centered(canvas, CANVAS_W / 2, 12, "METRONOME - QUICK GUIDE", 2, col_gold);
 
-            draw_text(canvas, 28,  58, "A BUTTON      : PLAY / PAUSE", 1, col_white);
-            draw_text(canvas, 28,  74, "B BUTTON      : RESET TO 120 BPM", 1, col_white);
-            draw_text(canvas, 28,  90, "D-PAD UP/DOWN : TEMPO +/- 1 BPM", 1, col_cyan);
-            draw_text(canvas, 28, 106, "D-PAD L/R     : TIME SIGNATURE", 1, col_cyan);
-            draw_text(canvas, 28, 122, "L1 / R1       : DROP CLICK -/+ 5%", 1, col_gold);
-            draw_text(canvas, 28, 138, "Y BUTTON      : TOGGLE HELP", 1, col_muted);
-            draw_text(canvas, 28, 154, "MENU (ESC)    : SAVE & EXIT", 1, col_accent);
+            draw_text_centered(canvas, CANVAS_W / 2, 34,
+                               "Sample-accurate pulse (30-260 BPM), 5 meters,", 1, col_white);
+            draw_text_centered(canvas, CANVAS_W / 2, 44,
+                               "4 studio kits & 4-bar lock-in stealth drop.", 1, col_muted);
+            draw_rect(canvas, 16, 55, 288, 1, col_border);
 
-            draw_rect(canvas, 28, 182, 264, 24, col_panel);
-            draw_border(canvas, 28, 182, 264, 24, 1, col_border);
-            draw_text_centered(canvas, CANVAS_W / 2, 191, "PRESS Y, A, OR B TO CLOSE", 1, col_gold);
+            draw_text(canvas, 20,  61, "A BUTTON    : Play / Pause metronome", 1, col_white);
+            draw_text(canvas, 20,  74, "B BUTTON    : Reset tempo to 120 BPM", 1, col_white);
+            draw_text(canvas, 20,  87, "D-PAD U/D   : Tempo +/-1 BPM (hold=fast)", 1, col_cyan);
+            draw_text(canvas, 20, 100, "D-PAD L/R   : Meter (4/4,3/4,2/4,5/4,7/4)", 1, col_cyan);
+            draw_text(canvas, 20, 113, "L1 / R1     : Beat drop rate -/+5% (0-100%)", 1, col_gold);
+            draw_text(canvas, 20, 126, "L2 TRIGGER  : Cycle 4 kits (Wood/Rim/Cl/Mar)", 1, col_beat);
+            draw_text(canvas, 20, 139, "Y BUTTON    : Toggle this Help guide", 1, col_muted);
+            draw_text(canvas, 20, 152, "MENU (ESC)  : Save settings & exit", 1, col_accent);
+
+            draw_rect(canvas, 16, 166, 288, 38, col_panel);
+            draw_border(canvas, 16, 166, 288, 38, 1, col_border);
+            draw_text_centered(canvas, CANVAS_W / 2, 170,
+                               "TIP: Raise DROP% to test your internal clock.", 1, col_gold);
+            draw_text_centered(canvas, CANVAS_W / 2, 182,
+                               "First 4 bars lock in 100% before clicks mute.", 1, col_white);
+            draw_text_centered(canvas, CANVAS_W / 2, 194,
+                               "Use side VOL+/- buttons to adjust loudness.", 1, col_muted);
+
+            draw_rect(canvas, 16, 210, 288, 18, col_panel);
+            draw_border(canvas, 16, 210, 288, 18, 1, col_gold);
+            draw_text_centered(canvas, CANVAS_W / 2, 216, "PRESS Y OR B TO CLOSE", 1, col_gold);
         }
 
         if (dump_promo_mode && dump_prefix) {
