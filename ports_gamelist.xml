@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<gameList>
+	<game>
+		<path>./Bard.sh</path>
+		<name>Bard</name>
+		<desc>EPUB and plain-text e-book reader.</desc>
+		<image>./images/Bard-image.png</image>
+		<thumbnail>./images/Bard-thumb.png</thumbnail>
+		<genre>Utility</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./Boot_Logo.sh</path>
+		<name>Boot Logo Customizer</name>
+		<desc>Preview and flash custom boot logos.</desc>
+		<image>./images/Boot_Logo-image.png</image>
+		<thumbnail>./images/Boot_Logo-thumb.png</thumbnail>
+		<genre>Utility</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./Calc.sh</path>
+		<name>Calc</name>
+		<desc>Basic and scientific calculator.</desc>
+		<image>./images/Calc-image.png</image>
+		<thumbnail>./images/Calc-thumb.png</thumbnail>
+		<genre>Utility</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./ChordWheel.sh</path>
+		<name>ChordWheel</name>
+		<desc>Circle of Fifths and chord looper.</desc>
+		<image>./images/ChordWheel-image.png</image>
+		<thumbnail>./images/ChordWheel-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./EarTrainer.sh</path>
+		<name>EarTrainer</name>
+		<desc>Guitar interval and chord ear trainer.</desc>
+		<image>./images/EarTrainer-image.png</image>
+		<thumbnail>./images/EarTrainer-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./Fretboard.sh</path>
+		<name>Fretboard</name>
+		<desc>Guitar scales, CAGED, and chord finder.</desc>
+		<image>./images/Fretboard-image.png</image>
+		<thumbnail>./images/Fretboard-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./LickTrainer.sh</path>
+		<name>LickTrainer</name>
+		<desc>Guitar tab player and speed trainer.</desc>
+		<image>./images/LickTrainer-image.png</image>
+		<thumbnail>./images/LickTrainer-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./Metronome.sh</path>
+		<name>Metronome</name>
+		<desc>Studio metronome with stealth beat drop.</desc>
+		<image>./images/Metronome-image.png</image>
+		<thumbnail>./images/Metronome-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./MusicPlayer.sh</path>
+		<name>MusicPlayer</name>
+		<desc>Folder player for MP3, FLAC, OGG, WAV.</desc>
+		<image>./images/MusicPlayer-image.png</image>
+		<thumbnail>./images/MusicPlayer-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./Night_Clock.sh</path>
+		<name>Night Clock</name>
+		<desc>Bedside LED and analog alarm clock.</desc>
+		<image>./images/Night_Clock-image.png</image>
+		<thumbnail>./images/Night_Clock-thumb.png</thumbnail>
+		<genre>Utility</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./PocketBand.sh</path>
+		<name>PocketBand</name>
+		<desc>Drums, bass, and chords backing band.</desc>
+		<image>./images/PocketBand-image.png</image>
+		<thumbnail>./images/PocketBand-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./Pomodoro.sh</path>
+		<name>Pomodoro</name>
+		<desc>Focus timer with chimes and work log.</desc>
+		<image>./images/Pomodoro-image.png</image>
+		<thumbnail>./images/Pomodoro-thumb.png</thumbnail>
+		<genre>Utility</genre>
+		<lang>en</lang>
+	</game>
+	<game>
+		<path>./SightRead.sh</path>
+		<name>SightRead</name>
+		<desc>Guitar staff sight-reading trainer.</desc>
+		<image>./images/SightRead-image.png</image>
+		<thumbnail>./images/SightRead-thumb.png</thumbnail>
+		<genre>Music</genre>
+		<lang>en</lang>
+	</game>
+</gameList>

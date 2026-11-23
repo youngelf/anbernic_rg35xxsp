@@ -6,6 +6,10 @@ The RG 35xxSP is a simple ARM64 Linux machine (Allwinner H700 Cortex-A53). Every
 
 Press **`Y`** inside any application to open its built-in English Quick Guide & Controls overlay, and press **`MENU`** (`Esc` on desktop) to save state and exit.
 
+> **Installing to Your RG 35xxSP SD Card (with Ports Icons)**:
+> - Run `./install_to_sdcard.sh /path/to/SHARE/roms/ports` (or `make package` to assemble a unified `sdcard_package/roms/ports/`). This copies all 13 apps, places their `512x512` icons in `roms/ports/images/<App>-image.png` & `<App>-thumb.png`, installs `soundfonts/GeneralUser-GS.sf2`, and safely merges [`ports_gamelist.xml`](ports_gamelist.xml) into `roms/ports/gamelist.xml` without overwriting existing PortMaster entries.
+> - Copy while Knulli is powered off (or after stopping EmulationStation), then press **START -> Game Settings -> Update Games Lists** so EmulationStation loads the new icons and descriptions.
+>
 > **Optional Studio SoundFont Audio**: The music and timer apps (`chordwheel`, `eartrainer`, `fretboard`, `licktrainer`, `metronome`, `pocketband`, `pomodoro`, and `sightread`) run their audio synthesis on a dedicated background thread and automatically load **`GeneralUser-GS.sf2`** (or `pocketband.sf2`) with stereo room reverb. For upgraded multi-sampled studio audio on your RG 35xxSP, copy `soundfonts/GeneralUser-GS.sf2` to `/userdata/roms/ports/soundfonts/GeneralUser-GS.sf2` on your SD card.
 
 ---

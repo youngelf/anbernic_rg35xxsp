@@ -557,8 +557,8 @@ static void format_bass_pitch_name(int key_pc, const BarChord *bc, uint8_t bass_
 #define GM_RIDE_CYM     51
 #define GM_RIDE_BELL    53
 
-#define PB_MAX_PENDING_EV 32
-#define PB_MAX_ACTIVE_GATES 16
+#define PB_MAX_PENDING_EV 64
+#define PB_MAX_ACTIVE_GATES 64
 
 typedef struct {
     bool  used;
@@ -808,24 +808,31 @@ static void sf2_fire_note_now(int channel, int key, float vel, int gate_samples,
                 g_synth.active_gates[i].active = false;
             }
         }
-    }
-    rg35_sf2_note_on(&g_sf2, channel, key, vel);
-    if (gate_samples > 0) {
-        /* Replace existing gate on same channel+key or claim free/shortest slot */
-        int slot = -1;
-        int min_rem = 0x7FFFFFFF;
-        int min_idx = 0;
+    } else if (gate_samples > 0) {
+        /* Smoothly release any previous still-gated note on the same channel+key
+         * before retriggering so every note_on has an exact 1:1 note_off pairing. */
         for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
             if (g_synth.active_gates[i].active &&
                 g_synth.active_gates[i].channel == channel &&
                 g_synth.active_gates[i].key == key) {
+                rg35_sf2_note_off(&g_sf2, channel, key);
+                g_synth.active_gates[i].active = false;
+                break;
+            }
+        }
+    }
+    rg35_sf2_note_on(&g_sf2, channel, key, vel);
+    if (gate_samples > 0) {
+        /* Claim free slot or release shortest-remaining gate if full */
+        int slot = -1;
+        int min_rem = 0x7FFFFFFF;
+        int min_idx = 0;
+        for (int i = 0; i < PB_MAX_ACTIVE_GATES; i++) {
+            if (!g_synth.active_gates[i].active) {
                 slot = i;
                 break;
             }
-            if (!g_synth.active_gates[i].active && slot < 0) {
-                slot = i;
-            }
-            if (g_synth.active_gates[i].active && g_synth.active_gates[i].rem_samples < min_rem) {
+            if (g_synth.active_gates[i].rem_samples < min_rem) {
                 min_rem = g_synth.active_gates[i].rem_samples;
                 min_idx = i;
             }
@@ -1049,8 +1056,10 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
                             (fp == 1) ? GM_HIGH_TOM :
                             (fp == 2) ? GM_MID_TOM : GM_LOW_TOM;
             if (use_sf2) {
+                int fill_gate = (fill_note == GM_SNARE_1) ? ((SAMPLE_RATE * 320) / 1000)
+                                                          : ((SAMPLE_RATE * 650) / 1000);
                 sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_KIT, fill_note,
-                                  humanize_vel(0.68f, 0.06f), 0, false);
+                                  humanize_vel(0.68f, 0.06f), fill_gate, false);
             } else {
                 g_synth.snare_total  = (SAMPLE_RATE * 110) / 1000;
                 g_synth.snare_rem    = g_synth.snare_total;
@@ -1067,7 +1076,7 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
                 if (use_sf2) {
                     int gnote = (style_id == 5) ? GM_SIDE_STICK : GM_SNARE_1;
                     sf2_schedule_note(humanize_micro_delay(3), PB_CH_DRUM_KIT, gnote,
-                                      humanize_vel(0.28f, 0.04f), 0, false);
+                                      humanize_vel(0.28f, 0.04f), (SAMPLE_RATE * 240) / 1000, false);
                 } else {
                     g_synth.snare_total = (SAMPLE_RATE * 75) / 1000;
                     g_synth.snare_rem   = g_synth.snare_total;
@@ -1124,27 +1133,31 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
     if (use_sf2) {
         /* Tasteful crash cymbal on Beat 1 after a turnaround / fill bar */
         if (step_idx == 0 && bar_idx == 0 && g_auto_fill && (next_rng_u32() % 100u) < 40u) {
-            sf2_schedule_note(0, PB_CH_DRUM_CYM, GM_CRASH_CYM, humanize_vel(0.62f, 0.05f), 0, false);
+            sf2_schedule_note(0, PB_CH_DRUM_CYM, GM_CRASH_CYM, humanize_vel(0.62f, 0.05f),
+                              (SAMPLE_RATE * 2000) / 1000, false);
         }
 
         if (kick_hit > 0) {
             int k_note = is_jazz ? GM_KICK_1 : GM_KICK_2;
             float k_vel = (kick_hit == 2) ? 0.92f : 0.74f;
-            sf2_schedule_note(0, PB_CH_DRUM_KIT, k_note, humanize_vel(k_vel, 0.04f), 0, false);
+            sf2_schedule_note(0, PB_CH_DRUM_KIT, k_note, humanize_vel(k_vel, 0.04f),
+                              (SAMPLE_RATE * 350) / 1000, false);
             g_synth.vu_kick = (kick_hit == 2) ? 1.0f : 0.78f;
         }
 
         if (snare_hit > 0) {
             int s_note;
+            int s_gate = (SAMPLE_RATE * 350) / 1000;
             if (is_fill_bar && step_idx >= fill_start) {
                 s_note = (step_idx == spb - 1) ? GM_LOW_TOM :
                          (step_idx == spb - 2) ? GM_MID_TOM : GM_SNARE_1;
+                if (s_note != GM_SNARE_1) s_gate = (SAMPLE_RATE * 650) / 1000;
             } else {
                 s_note = (snare_hit == 2) ? GM_SNARE_2 : GM_SNARE_1;
             }
             float s_vel = (snare_hit == 2) ? 0.88f : 0.64f;
             sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_KIT, s_note,
-                              humanize_vel(s_vel, 0.05f), 0, false);
+                              humanize_vel(s_vel, 0.05f), s_gate, false);
             g_synth.vu_snare = (snare_hit == 2) ? 1.0f : 0.72f;
         }
 
@@ -1154,11 +1167,11 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
                 int r_note = (ophat_hit == 2) ? GM_RIDE_BELL : GM_RIDE_CYM;
                 float r_vel = (ophat_hit == 2) ? 0.78f : 0.60f;
                 sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_CYM, r_note,
-                                  humanize_vel(r_vel, 0.05f), 0, false);
+                                  humanize_vel(r_vel, 0.05f), (SAMPLE_RATE * 1100) / 1000, false);
             } else {
                 float oh_vel = (ophat_hit == 2) ? 0.78f : 0.62f;
                 sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_HAT, GM_OPEN_HAT,
-                                  humanize_vel(oh_vel, 0.04f), 0, false);
+                                  humanize_vel(oh_vel, 0.04f), (SAMPLE_RATE * 900) / 1000, false);
             }
             g_synth.vu_hat = (ophat_hit == 2) ? 0.95f : 0.70f;
         } else if (clhat_hit > 0) {
@@ -1166,7 +1179,7 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
             float ch_vel = (clhat_hit == 2) ? 0.74f : 0.52f;
             /* choke_channel=true cleanly chokes any ringing Open Hi-Hat */
             sf2_schedule_note(humanize_micro_delay(2), PB_CH_DRUM_HAT, ch_note,
-                              humanize_vel(ch_vel, 0.05f), 0, true);
+                              humanize_vel(ch_vel, 0.05f), (SAMPLE_RATE * 180) / 1000, true);
             g_synth.vu_hat = (clhat_hit == 2) ? 0.75f : 0.52f;
         }
     } else {
@@ -1299,7 +1312,7 @@ static void init_synth(void) {
 static void init_sf2_engine(void) {
     if (g_sf2_loaded) return;
     /* reverb_wet=0.20 gives lush studio room depth; master_gain=1.35f feeds soft limiter */
-    bool ok = rg35_sf2_init(&g_sf2, SAMPLE_RATE, 64, 0.20f, 1.35f);
+    bool ok = rg35_sf2_init(&g_sf2, SAMPLE_RATE, 96, 0.20f, 1.35f);
     g_sf2_loaded = ok;
     if (ok) {
         g_synth.sf2_configured_style = -1;

@@ -59,8 +59,10 @@ test: $(HOST_TARGET)
 
 package: $(TARGET) calc.png Calc.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/calc
+	mkdir -p sdcard_package/roms/ports/calc sdcard_package/roms/ports/images
 	cp $(TARGET) calc.png sdcard_package/roms/ports/calc/
+	cp calc.png sdcard_package/roms/ports/images/Calc-image.png
+	cp calc.png sdcard_package/roms/ports/images/Calc-thumb.png
 	cp Calc.sh sdcard_package/roms/ports/Calc.sh
 	chmod +x sdcard_package/roms/ports/Calc.sh sdcard_package/roms/ports/calc/$(TARGET)
 

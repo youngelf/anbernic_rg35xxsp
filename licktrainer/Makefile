@@ -66,8 +66,10 @@ screenshots: $(HOST_TARGET)
 
 package: $(TARGET) licktrainer.png LickTrainer.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/licktrainer
+	mkdir -p sdcard_package/roms/ports/licktrainer sdcard_package/roms/ports/images
 	cp $(TARGET) licktrainer.png sdcard_package/roms/ports/licktrainer/
+	cp licktrainer.png sdcard_package/roms/ports/images/LickTrainer-image.png
+	cp licktrainer.png sdcard_package/roms/ports/images/LickTrainer-thumb.png
 	cp LickTrainer.sh sdcard_package/roms/ports/LickTrainer.sh
 	chmod +x sdcard_package/roms/ports/LickTrainer.sh sdcard_package/roms/ports/licktrainer/$(TARGET)
 

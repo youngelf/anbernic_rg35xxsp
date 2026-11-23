@@ -58,8 +58,10 @@ run-linux: $(HOST_TARGET)
 
 package: $(TARGET) chordwheel.png ChordWheel.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/chordwheel
+	mkdir -p sdcard_package/roms/ports/chordwheel sdcard_package/roms/ports/images
 	cp $(TARGET) chordwheel.png sdcard_package/roms/ports/chordwheel/
+	cp chordwheel.png sdcard_package/roms/ports/images/ChordWheel-image.png
+	cp chordwheel.png sdcard_package/roms/ports/images/ChordWheel-thumb.png
 	cp ChordWheel.sh sdcard_package/roms/ports/ChordWheel.sh
 	chmod +x sdcard_package/roms/ports/ChordWheel.sh sdcard_package/roms/ports/chordwheel/$(TARGET)
 

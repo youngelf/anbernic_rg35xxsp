@@ -47,8 +47,10 @@ $(TARGET_LINUX): $(SRC) pocketband_font.h ../rg35xxsp_input.h ../rg35xxsp_sf2.h
 
 package: $(TARGET_ARM) PocketBand.sh pocketband.png pocketband.sf2
 	rm -rf $(PACKAGE_DIR)
-	mkdir -p $(PACKAGE_DIR)/roms/ports/pocketband
+	mkdir -p $(PACKAGE_DIR)/roms/ports/pocketband $(PACKAGE_DIR)/roms/ports/images
 	cp $(TARGET_ARM) pocketband.png pocketband.sf2 $(PACKAGE_DIR)/roms/ports/pocketband/
+	cp pocketband.png $(PACKAGE_DIR)/roms/ports/images/PocketBand-image.png
+	cp pocketband.png $(PACKAGE_DIR)/roms/ports/images/PocketBand-thumb.png
 	cp PocketBand.sh $(PACKAGE_DIR)/roms/ports/PocketBand.sh
 	chmod +x $(PACKAGE_DIR)/roms/ports/PocketBand.sh $(PACKAGE_DIR)/roms/ports/pocketband/$(TARGET_ARM)
 

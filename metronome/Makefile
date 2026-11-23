@@ -58,9 +58,12 @@ run-linux: $(HOST_TARGET)
 	./$(HOST_TARGET)
 
 package: $(TARGET)
-	mkdir -p sdcard_package/roms/ports/metronome
+	rm -rf sdcard_package
+	mkdir -p sdcard_package/roms/ports/metronome sdcard_package/roms/ports/images
 	cp $(TARGET) sdcard_package/roms/ports/metronome/
 	cp metronome.png sdcard_package/roms/ports/metronome/
+	cp metronome.png sdcard_package/roms/ports/images/Metronome-image.png
+	cp metronome.png sdcard_package/roms/ports/images/Metronome-thumb.png
 	cp Metronome.sh sdcard_package/roms/ports/Metronome.sh
 	chmod +x sdcard_package/roms/ports/Metronome.sh sdcard_package/roms/ports/metronome/$(TARGET)
 

@@ -1081,6 +1081,14 @@ static void tsf_voice_envelope_nextsegment(struct tsf_voice_envelope* e, short a
 			}
 			/* fall through */
 		case TSF_SEGMENT_DECAY:
+			if (e->isAmpEnv && e->parameters.sustain <= 1e-5f)
+			{
+				e->segment = TSF_SEGMENT_DONE;
+				e->segmentIsExponential = TSF_FALSE;
+				e->level = e->slope = 0.0f;
+				e->samplesUntilNextSegment = 0x7FFFFFF;
+				return;
+			}
 			e->segment = TSF_SEGMENT_SUSTAIN;
 			e->level = e->parameters.sustain;
 			e->slope = 0.0f;
@@ -1347,7 +1355,8 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 				break;
 		}
 
-		if (tmpSourceSamplePosition >= tmpSampleEndDbl || v->ampenv.segment == TSF_SEGMENT_DONE)
+		if (tmpSourceSamplePosition >= tmpSampleEndDbl || v->ampenv.segment == TSF_SEGMENT_DONE ||
+			(v->ampenv.segment == TSF_SEGMENT_RELEASE && v->ampenv.level < 5e-5f))
 		{
 			tsf_voice_kill(v);
 			return;
@@ -1579,17 +1588,53 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 		{
 			if (f->maxVoiceNum)
 			{
-				// Voices have been pre-allocated and limited to a maximum, try to kill a voice off in its release envelope
+				// Voices have been pre-allocated and limited to a maximum:
+				// 1) Prefer stealing a voice in RELEASE (quietest / furthest into release).
+				float bestReleaseLevel = 1e30f;
 				int bestKillReleaseSamplePos = -999999999;
 				for (v = f->voices; v != vEnd; v++)
 				{
-					if (v->ampenv.segment == TSF_SEGMENT_RELEASE)
+					if (v->playingPreset != -1 && v->playIndex != voicePlayIndex && v->ampenv.segment == TSF_SEGMENT_RELEASE)
 					{
-						// We're looking for the voice furthest into its release
 						int releaseSamplesDone = tsf_voice_envelope_release_samples(&v->ampenv, f->outSampleRate) - v->ampenv.samplesUntilNextSegment;
-						if (releaseSamplesDone > bestKillReleaseSamplePos)
+						if (v->ampenv.level < bestReleaseLevel ||
+							(v->ampenv.level == bestReleaseLevel && releaseSamplesDone > bestKillReleaseSamplePos))
 						{
+							bestReleaseLevel = v->ampenv.level;
 							bestKillReleaseSamplePos = releaseSamplesDone;
+							voice = v;
+						}
+					}
+				}
+				// 2) Fallback: if no voice is in RELEASE, steal the quietest decaying/sustaining voice
+				//    (never stealing voices from the note currently being triggered).
+				if (!voice)
+				{
+					float lowestScore = 1e30f;
+					unsigned int oldestPlayIndex = 0xFFFFFFFFu;
+					for (v = f->voices; v != vEnd; v++)
+					{
+						if (v->playingPreset != -1 && v->playIndex != voicePlayIndex && v->ampenv.segment >= TSF_SEGMENT_DECAY)
+						{
+							float score = v->ampenv.level * tsf_decibelsToGain(v->noteGainDB);
+							if (score < lowestScore || (score == lowestScore && v->playIndex < oldestPlayIndex))
+							{
+								lowestScore = score;
+								oldestPlayIndex = v->playIndex;
+								voice = v;
+							}
+						}
+					}
+				}
+				// 3) Last resort: steal the oldest voice from an earlier note.
+				if (!voice)
+				{
+					unsigned int oldestPlayIndex = 0xFFFFFFFFu;
+					for (v = f->voices; v != vEnd; v++)
+					{
+						if (v->playingPreset != -1 && v->playIndex != voicePlayIndex && v->playIndex < oldestPlayIndex)
+						{
+							oldestPlayIndex = v->playIndex;
 							voice = v;
 						}
 					}

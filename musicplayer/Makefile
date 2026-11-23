@@ -60,8 +60,10 @@ test: $(HOST_TARGET)
 
 package: $(TARGET) musicplayer.png MusicPlayer.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/musicplayer
+	mkdir -p sdcard_package/roms/ports/musicplayer sdcard_package/roms/ports/images
 	cp $(TARGET) musicplayer.png sdcard_package/roms/ports/musicplayer/
+	cp musicplayer.png sdcard_package/roms/ports/images/MusicPlayer-image.png
+	cp musicplayer.png sdcard_package/roms/ports/images/MusicPlayer-thumb.png
 	cp MusicPlayer.sh sdcard_package/roms/ports/MusicPlayer.sh
 	chmod +x sdcard_package/roms/ports/MusicPlayer.sh sdcard_package/roms/ports/musicplayer/$(TARGET)
 

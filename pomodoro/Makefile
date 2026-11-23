@@ -72,9 +72,12 @@ run-linux: $(HOST_TARGET)
 	./$(HOST_TARGET)
 
 package: $(TARGET)
-	mkdir -p sdcard_package/roms/ports/pomodoro
+	rm -rf sdcard_package
+	mkdir -p sdcard_package/roms/ports/pomodoro sdcard_package/roms/ports/images
 	cp $(TARGET) sdcard_package/roms/ports/pomodoro/
 	cp pomodoro.png sdcard_package/roms/ports/pomodoro/
+	cp pomodoro.png sdcard_package/roms/ports/images/Pomodoro-image.png
+	cp pomodoro.png sdcard_package/roms/ports/images/Pomodoro-thumb.png
 	cp Pomodoro.sh sdcard_package/roms/ports/Pomodoro.sh
 	chmod +x sdcard_package/roms/ports/Pomodoro.sh sdcard_package/roms/ports/pomodoro/$(TARGET)
 

@@ -59,8 +59,10 @@ run-linux: $(HOST_TARGET)
 
 package: $(TARGET)
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/fretboard
+	mkdir -p sdcard_package/roms/ports/fretboard sdcard_package/roms/ports/images
 	cp $(TARGET) fretboard.png sdcard_package/roms/ports/fretboard/
+	cp fretboard.png sdcard_package/roms/ports/images/Fretboard-image.png
+	cp fretboard.png sdcard_package/roms/ports/images/Fretboard-thumb.png
 	cp Fretboard.sh sdcard_package/roms/ports/Fretboard.sh
 	chmod +x sdcard_package/roms/ports/Fretboard.sh sdcard_package/roms/ports/fretboard/$(TARGET)
 

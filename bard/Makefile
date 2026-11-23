@@ -68,8 +68,10 @@ test: $(HOST_TARGET)
 
 package: $(TARGET) bard.png Bard.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/bard/media
+	mkdir -p sdcard_package/roms/ports/bard/media sdcard_package/roms/ports/images
 	cp $(TARGET) bard.png sdcard_package/roms/ports/bard/
+	cp bard.png sdcard_package/roms/ports/images/Bard-image.png
+	cp bard.png sdcard_package/roms/ports/images/Bard-thumb.png
 	cp media/*.epub sdcard_package/roms/ports/bard/media/
 	cp Bard.sh sdcard_package/roms/ports/Bard.sh
 	chmod +x sdcard_package/roms/ports/Bard.sh sdcard_package/roms/ports/bard/$(TARGET)

@@ -8,6 +8,7 @@
  *   - Stereo Schroeder/Freeverb-style room reverb (4 comb + 2 allpass diffusers per channel)
  *   - 20 Hz stereo DC-blocking high-pass filter & soft-clip master limiter (tanhf)
  *   - Zero dynamic allocations inside the real-time audio render loop
+ *   - Patched tsf.h voice lifecycle: reaps silent-sustain voices & quietest-voice stealing
  *
  * Usage:
  *   In ONE .c file per application:

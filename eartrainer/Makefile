@@ -59,8 +59,10 @@ run-linux: $(HOST_TARGET)
 
 package: $(TARGET)
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/eartrainer
+	mkdir -p sdcard_package/roms/ports/eartrainer sdcard_package/roms/ports/images
 	cp $(TARGET) eartrainer.png sdcard_package/roms/ports/eartrainer/
+	cp eartrainer.png sdcard_package/roms/ports/images/EarTrainer-image.png
+	cp eartrainer.png sdcard_package/roms/ports/images/EarTrainer-thumb.png
 	cp EarTrainer.sh sdcard_package/roms/ports/EarTrainer.sh
 	chmod +x sdcard_package/roms/ports/EarTrainer.sh sdcard_package/roms/ports/eartrainer/$(TARGET)
 

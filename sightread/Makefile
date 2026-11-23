@@ -66,8 +66,10 @@ screenshots: $(HOST_TARGET)
 
 package: $(TARGET) sightread.png SightRead.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/sightread
+	mkdir -p sdcard_package/roms/ports/sightread sdcard_package/roms/ports/images
 	cp $(TARGET) sightread.png sdcard_package/roms/ports/sightread/
+	cp sightread.png sdcard_package/roms/ports/images/SightRead-image.png
+	cp sightread.png sdcard_package/roms/ports/images/SightRead-thumb.png
 	cp SightRead.sh sdcard_package/roms/ports/SightRead.sh
 	chmod +x sdcard_package/roms/ports/SightRead.sh sdcard_package/roms/ports/sightread/$(TARGET)
 

@@ -61,8 +61,10 @@ run-linux: $(HOST_TARGET)
 
 package: $(TARGET) night_clock.png Night_Clock.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/night_clock
+	mkdir -p sdcard_package/roms/ports/night_clock sdcard_package/roms/ports/images
 	cp $(TARGET) night_clock.png sdcard_package/roms/ports/night_clock/
+	cp night_clock.png sdcard_package/roms/ports/images/Night_Clock-image.png
+	cp night_clock.png sdcard_package/roms/ports/images/Night_Clock-thumb.png
 	cp Night_Clock.sh sdcard_package/roms/ports/Night_Clock.sh
 	chmod +x sdcard_package/roms/ports/Night_Clock.sh sdcard_package/roms/ports/night_clock/$(TARGET)
 

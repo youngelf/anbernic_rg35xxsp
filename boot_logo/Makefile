@@ -61,8 +61,10 @@ run-linux: $(HOST_TARGET)
 
 package: $(TARGET) boot_logo.png Boot_Logo.sh
 	rm -rf sdcard_package
-	mkdir -p sdcard_package/roms/ports/boot_logo/logos sdcard_package/roms/ports/boot_logo/backup
+	mkdir -p sdcard_package/roms/ports/boot_logo/logos sdcard_package/roms/ports/boot_logo/backup sdcard_package/roms/ports/images
 	cp $(TARGET) boot_logo.png sdcard_package/roms/ports/boot_logo/
+	cp boot_logo.png sdcard_package/roms/ports/images/Boot_Logo-image.png
+	cp boot_logo.png sdcard_package/roms/ports/images/Boot_Logo-thumb.png
 	cp logos/*.bmp sdcard_package/roms/ports/boot_logo/logos/
 	cp backup/bootlogo.stock.bmp sdcard_package/roms/ports/boot_logo/backup/
 	cp Boot_Logo.sh sdcard_package/roms/ports/Boot_Logo.sh
