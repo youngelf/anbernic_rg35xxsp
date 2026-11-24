@@ -1,0 +1,26 @@
+# 16-Bar '50s Doo-Wop & Classic Soul (A-A-B-A' with bridge lift & turnaround)
+
+name = 50s Soul 4/4
+genre = SOUL 4/4
+examples = Stand By Me, Earth Angel, Unchained Melody
+meter = 4/4
+bpm = 108
+swing = 58
+default_key = C
+kit = pop_soul
+
+scale_name = Major Pentatonic + Major (1 2 3 4 5 6 7)
+scale = 1 2 3 4 5 6 7
+
+sections = A | A | BRG | TURN
+chords = I   | vi | IV | V
+chords = I   | vi | IV | V
+chords = IV  | IV | I  | I
+chords = ii7 | V7 | I  | V7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &
+kick  = 2 . . 1 . . 1 .
+snare = . . 2 . . . 2 .
+clhat = 2 1 2 1 2 1 2 1
+ophat = . . . . . . . .
+bass  = R . 3 . 5 . 6 5

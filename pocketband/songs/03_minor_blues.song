@@ -1,0 +1,25 @@
+# 12-Bar Minor Blues in 4/4 (i7 - iv7 with bVImaj7 -> V7 turnaround)
+
+name = Minor Blues 4/4
+genre = BLUES 4/4
+examples = The Thrill Is Gone, Black Magic Woman, Still Got the Blues
+meter = 4/4
+bpm = 90
+swing = 60
+default_key = B
+kit = slow_blues
+
+scale_name = Minor Pentatonic + Blues (1 b3 4 b5 5 b7)
+scale = 1 b3 4 *b5 5 b7
+
+sections = A | B | TURN
+chords = i7      | i7  | i7 | i7
+chords = iv7     | iv7 | i7 | i7
+chords = bVImaj7 | V7  | i7 | V7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &
+kick  = 2 . . . 1 . . 1
+snare = . . 2 . . . 2 .
+clhat = 2 1 2 1 2 1 2 .
+ophat = . . . . . . . 1
+bass  = R . 5 . b7 5 R 5

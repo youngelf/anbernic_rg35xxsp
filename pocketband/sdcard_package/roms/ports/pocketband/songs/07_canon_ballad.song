@@ -1,0 +1,26 @@
+# 16-Bar Pachelbel Canon + Pop-Rock Chorus Lift
+
+name = Canon Ballad 4/4
+genre = POP 4/4
+examples = Canon in D, Basket Case, Let It Be, Memories
+meter = 4/4
+bpm = 100
+swing = 50
+default_key = D
+kit = acoustic_folk
+
+scale_name = Major / Ionian (1 2 3 4 5 6 7)
+scale = 1 2 3 4 5 6 7
+
+sections = A | A | B | B'
+chords = I  | V  | vi  | iii
+chords = IV | I  | IV  | V
+chords = vi | IV | I   | V
+chords = vi | IV | ii7 | V7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &
+kick  = 2 . . 1 . . 1 .
+snare = . . 2 . . . 2 .
+clhat = 2 1 2 1 2 1 2 .
+ophat = . . . . . . . 1
+bass  = R . 5 . R 5 8 5

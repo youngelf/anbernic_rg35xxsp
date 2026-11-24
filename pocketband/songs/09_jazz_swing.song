@@ -1,0 +1,26 @@
+# 16-Bar Circle-of-Fifths Jazz Swing Standard (Walking Quarter-Note Bass)
+
+name = Jazz Swing 4/4
+genre = JAZZ 4/4
+examples = Fly Me to the Moon, Autumn Leaves, All the Things You Are
+meter = 4/4
+bpm = 126
+swing = 63
+default_key = C
+kit = jazz_swing
+
+scale_name = Major / Jazz Bebop (1 2 3 4 5 6 7)
+scale = 1 2 3 4 5 6 *b7 7
+
+sections = A | A' | B | TURN
+chords = vi7    | ii7     | V7    | Imaj7
+chords = IVmaj7 | viim7b5 | III7  | vi7
+chords = ii7    | V7      | Imaj7 | VI7
+chords = ii7    | V7      | Imaj7 | III7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &  (clhat = pedal chick 2&4, ophat = ride spang-a-lang)
+kick  = 1 . . . 1 . . .
+snare = . . . 1 . . . 1
+clhat = . . 2 . . . 2 .
+ophat = 2 . 1 1 2 . 1 1
+bass  = R . 3 . 5 . 7 .

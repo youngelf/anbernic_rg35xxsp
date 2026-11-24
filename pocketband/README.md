@@ -1,52 +1,98 @@
 # Anbernic RG 35xxSP PocketBand — Drum Machine, Bassline & Backing Band (`640x480`)
 
-A **5-track drum machine, walking bassline sequencer, stereo chord-comping backing band, and 12-fret guitar soloing map** built in pure C for the **Anbernic RG 35xxSP** (Allwinner H700 `aarch64`, `640x480` IPS display) and **Linux Desktop (`x86_64` X11)**.
+A **5-track drum machine, walking bassline sequencer, stereo chord-comping backing band, full multi-bar Song Chart (8 / 12 / 16+ bars), and on-demand `L2` 12-fret guitar soloing map** built in pure C for the **Anbernic RG 35xxSP** (Allwinner H700 `aarch64`, `640x480` IPS display) and **Linux Desktop (`x86_64` X11)**.
 
-Plug the RG 35xxSP's 3.5mm audio output into your guitar amp's AUX input (or headphones) and jam immediately over **Blues, Rock, and Jazz** backing tracks in **`4/4`** and **`3/4`**.
+All song structures live as editable plain-text `.song` files inside [`songs/`](songs/) — drop in your own custom `.song` files and PocketBand loads and cycles through all of them automatically on startup!
 
 ---
 
 ## Screenshots
 
-| Guitarist Jam View (`Blues Shuffle 4/4`, Intervals) | 5-Track Step & Bassline Editor (`Classic Rock 4/4`) |
+| 16-Bar Song Chart (`Blue Bossa 4/4`) | 12-Bar Song Chart (`Blues Shuffle 4/4`) |
 | :---: | :---: |
-| ![Jam View](promo/pocketband_jam.png) | ![Step Editor](promo/pocketband_steps.png) |
+| ![16-Bar Song Chart](promo/pocketband_jam.png) | ![12-Bar Song Chart](promo/pocketband_waltz.png) |
 
-| `3/4` Waltz Jam View (`Jazz Waltz 3/4`, Note Names) | Quick Guide & Groove Settings (`Y`) |
+| On-Demand `[L2]` 12-Fret Soloing Map | Quick Guide, Song Structure & Famous Songs (`Y`) |
 | :---: | :---: |
-| ![Jazz Waltz View](promo/pocketband_waltz.png) | ![Help Modal](promo/pocketband_help.png) |
+| ![L2 Fretboard Modal](promo/pocketband_fretboard.png) | ![Help Modal](promo/pocketband_help.png) |
+
+| 5-Track Drum & Bassline Step Editor (`SELECT`) |
+| :---: |
+| ![Step Editor](promo/pocketband_steps.png) |
 
 ---
 
-## Key Features
+## Included Disk Song Library (`songs/*.song`)
 
-1. **44.1 kHz Stereo SoundFont 2 + Multi-Track DSP Background Audio Engine**:
-   - Loads **`GeneralUser-GS.sf2`** or the bundled **`pocketband.sf2`** automatically via `../rg35xxsp_sf2.h` with stereo Schroeder/Freeverb room reverb for studio drum kits, fingered/upright bass, and Rhodes/jazz guitar comping.
-   - Includes a full 5-voice floating-point DSP synthesizer fallback (analog kick, dual-mode snare, 6-oscillator hi-hat/ride bank, resonant SVF electric bass, and 4-voice stereo Rhodes/rhythm guitar comping).
-   - Runs 100% of sequencing and audio synthesis on a **dedicated background audio thread** (`audio_thread_worker`) so the `640x480` UI stays at 60 FPS.
-2. **Native `640x480` Guitarist Jam View & 5-Track Step Editor (`SELECT`)**:
-   - **Live Per-Track VU Meters (`KCK`, `SNR`, `HAT`, `BAS`, `CMP`)**, active chord progression tracker, and groove inspector card.
-   - **12-Fret Rosewood Soloing Scale Map** with labeled dots that toggle between **Intervals (`R, b3, 4, b5, 5, b7`)** and **Note Names (`A, C, D, Eb, E, G`)** via **`L2`**.
-   - **5-Track Step Editor (`SELECT`)** displaying drum hit accents (`OFF`/`ON`/`ACC`) and transposed bassline notes (`R, 3, 5, 6, b7, 8`) on every step.
-3. **Interactive Groove Settings (`Y`) & Live Controls**:
-   - Open **`Y`** Help to fine-tune **Swing %** (`LEFT`/`RIGHT`) and toggle **4-Bar Auto-Fill** (`A`), or queue an instant end-of-bar drum fill in Jam View with **`B`**.
+All 13 built-in song structures are loaded from disk on startup (`LEFT`/`RIGHT` cycles through every `.song` file in alphabetical order). Press **`Y`** on any song to see which famous songs follow that structure:
+
+| File | Song | Bars | Meter | BPM | Famous Songs Using This Structure |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| `01_blues_shuffle.song` | Blues Shuffle 4/4 | 12 | 4/4 | 110 | *Sweet Home Chicago, Red House, Pride and Joy* |
+| `02_slow_blues_waltz.song` | Slow Blues 3/4 | 12 | 3/4 | 86 | *Stormy Monday, Texas Flood, Since I've Been Loving You* |
+| `03_minor_blues.song` | Minor Blues 4/4 | 12 | 4/4 | 90 | *The Thrill Is Gone, Black Magic Woman, Still Got the Blues* |
+| `04_classic_rock.song` | Classic Rock 4/4 | 16 | 4/4 | 120 | *Sweet Home Alabama, Born to Be Wild, Fortunate Son* |
+| `05_rock_ballad_waltz.song` | Rock Ballad 3/4 | 16 | 3/4 | 96 | *House of the Rising Sun, Nothing Else Matters* |
+| `06_descending_rock.song` | Descending Rock | 16 | 4/4 | 92 | *Hotel California (Verse + Chorus)* |
+| `07_canon_ballad.song` | Canon Ballad 4/4 | 16 | 4/4 | 100 | *Canon in D, Basket Case, Let It Be, Memories* |
+| `08_fifties_soul.song` | 50s Soul 4/4 | 16 | 4/4 | 108 | *Stand By Me, Earth Angel, Unchained Melody* |
+| `09_jazz_swing.song` | Jazz Swing 4/4 | 16 | 4/4 | 126 | *Fly Me to the Moon, Autumn Leaves, All the Things You Are* |
+| `10_jazz_waltz.song` | Jazz Waltz 3/4 | 16 | 3/4 | 132 | *Someday My Prince Will Come, Waltz for Debby, Bluesette* |
+| `11_blue_bossa.song` | Blue Bossa 4/4 | 16 | 4/4 | 136 | *Blue Bossa (Kenny Dorham), Black Orpheus* |
+| `12_rhythm_changes.song` | Rhythm Changes | 16 | 4/4 | 152 | *I Got Rhythm, Oleo, Anthropology, Flintstones Theme* |
+| `13_eight_bar_blues.song` | 8-Bar Blues 4/4 | 8 | 4/4 | 104 | *Key to the Highway, Worried Life Blues, Heartbreak Hotel* |
+
+---
+
+## Creating Your Own `.song` Files
+
+Copy any file in [`songs/`](songs/) (or see [`songs/README.txt`](songs/README.txt)) and save it as `<name>.song` inside `/userdata/roms/ports/pocketband/songs/` on your SD card (or `./songs/` on desktop). PocketBand scans every `.song` file in alphabetical order on startup.
+
+- **Comments**: Anything starting with `#` (full line or inline) is ignored.
+- **Chords**: Key-independent Roman numerals (`I`, `I7`, `Imaj7`, `i`, `i7`, `ii7`, `iim7b5`, `bIII`, `IV7`, `iv7`, `#ivdim7`, `V7`, `Vsus4`, `bVI`, `bVImaj7`, `vi7`, `bVII`, etc.) so **`UP`/`DOWN`** transposes your song to all 12 keys. Repeat `chords =` across multiple lines (up to **32 bars**; songs over 16 bars auto-page cleanly).
+- **Groove Kits (`kit =`)**: `blues_shuffle`, `slow_blues`, `classic_rock`, `rock_ballad`, `jazz_swing`, `jazz_waltz`, `bossa_nova`, `pop_soul`, `acoustic_folk`.
+- **Solo Scale (`scale =`)**: Scale intervals relative to key root (`1 b3 4 *b5 5 b7`); prefix with `*` to highlight characteristic blue/color notes in magenta on the `L2` Fretboard.
+- **Rhythm & Bass Patterns**: 8 steps for `4/4` or 6 steps for `3/4`. Drums use `.`/`1`/`2` (rest/normal/accent); `bass` uses `.`, `R`, `3`, `5`, `6`, `b7`/`7`, `8`.
+
+```ini
+# Example: 12-Bar Custom Rock Jam (save as songs/14_my_jam.song)
+name = My 12-Bar Jam
+genre = ROCK 4/4
+examples = Original Rock Jam
+meter = 4/4
+bpm = 116
+swing = 50
+kit = classic_rock
+scale_name = Minor Pentatonic (1 b3 4 5 b7)
+scale = 1 b3 4 5 b7
+sections = A | A | B
+chords = i  | bVII | bVI | bVII
+chords = i  | bVII | bVI | V7
+chords = IV | bVII | i   | V7
+kick  = 2 . . 1 2 . . .
+snare = . . 2 . . . 2 .
+clhat = 2 1 2 1 2 1 2 .
+ophat = . . . . . . . 1
+bass  = R R R 5 R R 8 5
+```
 
 ---
 
 ## Controls
 
-| RG 35xxSP Button | Desktop X11 Key (`pocketband_linux`) | Guitarist Jam View | Step Editor View |
-| :--- | :--- | :--- | :--- |
-| **`SELECT`** | `Tab` | Switch to **5-Track Step Editor** | Switch back to **Guitarist Jam View** |
-| **`A`** | `A`, `Space`, `Z`, or `Alt` | **Play / Stop** backing band | Cycle drum hit (`OFF`/`ON`/`ACC`) or bass degree (`R,3,5,6,b7,8`) |
-| **`B`** | `B`, `Backspace`, or `Ctrl` | **Queue Drum Fill** at end of bar | Clear selected step (`OFF`) |
-| **`X`** | `X` | **Cycle Backing Mix**: `Full Band` -> `Drums+Bass` -> `Drums Only` | **Cycle Backing Mix** (`Full Band` / `Drums+Bass` / `Drums Only`) |
-| **`L1 / R1`** | `L`/`Q`/`[`/`PgUp` and `R`/`E`/`]`/`PgDn` | Adjust **Tempo** (`-5` / `+5` BPM, `45-220 BPM`) | Adjust **Tempo** (`-5` / `+5` BPM) |
-| **`L2 / R2`** | `1` / `2` | `L2`: Fretboard **Intervals / Notes** \| `R2`: Cycle **Swing %** | `L2`: Fretboard **Intervals / Notes** \| `R2`: Cycle **Swing %** |
-| **`D-Pad LEFT / RIGHT`** | `Left` / `Right Arrow` | Cycle **6 Styles** (`Blues`, `Rock`, `Jazz` in `4/4` & `3/4`) | Move Step Cursor across beats |
-| **`D-Pad UP / DOWN`** | `Up` / `Down Arrow` | Transpose **Key** (`C`..`B`) | Select Track (`KICK`, `SNARE`, `CL HAT`, `OP HAT`, `BASS`) |
-| **`Y`** | `Y` | Toggle **Quick Guide & Groove** (`L/R`: Swing, `A`: Auto-Fill, `Y`/`B`: Close) | Toggle **Quick Guide & Groove** |
-| **`MENU (`M`)`** | `Esc` | Save State & **Exit** | Save State & **Exit** |
+| RG 35xxSP Button | Desktop X11 Key (`pocketband_linux`) | Song Chart Jam View | `[L2]` Fretboard Modal | Step Editor (`SELECT`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **`SELECT`** | `Tab` | Switch to **Step Editor** | Close Fretboard | Switch to **Jam View** |
+| **`A`** | `A`, `Space`, `Z` | **Play / Stop** backing band | Toggle **Intervals / Note Names** | Cycle Hit / Bass degree |
+| **`B`** | `B`, `Backspace` | **Queue Drum Fill** | Close Fretboard | Clear selected step |
+| **`X`** | `X` | Cycle **Mix** (`Full Band` / `Drums+Bass` / `Drums Only`) | Toggle **Intervals / Note Names** | Cycle **Mix** |
+| **`L1 / R1`** | `L`/`Q`/`[` and `R`/`E`/`]` | Adjust **Tempo** (`-5` / `+5` BPM) | Adjust **Tempo** (`-5` / `+5` BPM) | Adjust **Tempo** |
+| **`L2`** | `1` | Open / Close **12-Fret Fretboard Modal** | Close Fretboard | Open **Fretboard Modal** |
+| **`R2`** | `2` | Cycle **Swing %** | Cycle **Swing %** | Cycle **Swing %** |
+| **`LEFT / RIGHT`** | `Left` / `Right Arrow` | Cycle **Disk Songs (`*.song`)** | Cycle **Disk Songs** | Select Step |
+| **`UP / DOWN`** | `Up` / `Down Arrow` | Transpose **Key** (`C`..`B`) | Transpose **Key** (`C`..`B`) | Select Track |
+| **`Y`** | `Y` | Toggle **Help & Famous Songs** (`L/R`: Swing, `A`: Auto-Fill) | Open Help | Toggle Help |
+| **`MENU (`M`)`** | `Esc` | Save State & **Exit** | Save State & **Exit** | Save State & **Exit** |
 
 ---
 
@@ -56,6 +102,6 @@ Plug the RG 35xxSP's 3.5mm audio output into your guitar amp's AUX input (or hea
 cd pocketband
 make all
 ```
-- **RG 35xxSP Binary & SD Card Package**: `sdcard_package/roms/ports/PocketBand.sh` and `sdcard_package/roms/ports/pocketband/` (includes bundled `pocketband.sf2`)
+- **RG 35xxSP Binary & SD Card Package**: `sdcard_package/roms/ports/PocketBand.sh` and `sdcard_package/roms/ports/pocketband/` (includes `pocketband.sf2` and `songs/*.song` + `songs/README.txt`).
 - **Full GM SoundFont (Optional Upgrade)**: Copy `../soundfonts/GeneralUser-GS.sf2` to `/userdata/roms/ports/soundfonts/GeneralUser-GS.sf2` on your SD card.
-- **Linux Desktop X11 Simulator**: `./pocketband_linux` (or `make run-linux`)
+- **Linux Desktop X11 Simulator**: `./pocketband_linux` (or `make run-linux`).

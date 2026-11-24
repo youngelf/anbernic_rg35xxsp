@@ -38,8 +38,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <ctype.h>
 #include <math.h>
 #include <unistd.h>
+#include <dirent.h>
 #include <pthread.h>
 #include <signal.h>
 #include <time.h>
@@ -49,7 +51,6 @@
 
 #if defined(TARGET_RG35XXSP)
 #include <fcntl.h>
-#include <dirent.h>
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -221,6 +222,87 @@ static void draw_text_centered(int font_id, int bx, int by, int bw, int bh, cons
     draw_text(font_id, tx, ty, s, color);
 }
 
+static void draw_text_fit(int font_id, int bx, int by, int bw, int bh, const char *s, uint32_t color) {
+    int fid = font_id;
+    while (fid > FONT_UI_11 && text_width(fid, s) > bw - 6) {
+        fid--;
+    }
+    draw_text_centered(fid, bx, by, bw, bh, s, color);
+}
+
+static void draw_text_clipped(int font_id, int x, int y, int max_w, const char *s, uint32_t color) {
+    char buf[160];
+    size_t len = strlen(s);
+    if (len >= sizeof(buf)) len = sizeof(buf) - 1;
+    memcpy(buf, s, len);
+    buf[len] = '\0';
+    if (text_width(font_id, buf) <= max_w) {
+        draw_text(font_id, x, y, buf, color);
+        return;
+    }
+    while (len > 3) {
+        len--;
+        buf[len] = '\0';
+        char ell[164];
+        snprintf(ell, sizeof(ell), "%s...", buf);
+        if (text_width(font_id, ell) <= max_w) {
+            draw_text(font_id, x, y, ell, color);
+            return;
+        }
+    }
+    draw_text(font_id, x, y, buf, color);
+}
+
+static void draw_text_wrapped_centered(int font_id, int bx, int by, int bw, int line_h,
+                                       int max_lines, const char *s, uint32_t color) {
+    char work[256];
+    snprintf(work, sizeof(work), "%s", s ? s : "");
+    char *p = work;
+    int line_idx = 0;
+    while (*p && line_idx < max_lines) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        char line[192] = "";
+        char *cursor = p;
+        char *last_fit_end = NULL;
+        while (*cursor) {
+            while (*cursor == ' ') cursor++;
+            if (!*cursor) break;
+            char *word_start = cursor;
+            while (*cursor && *cursor != ' ') cursor++;
+            size_t cand_len = (size_t)(cursor - p);
+            if (cand_len >= sizeof(line)) cand_len = sizeof(line) - 1;
+            char cand[192];
+            memcpy(cand, p, cand_len);
+            cand[cand_len] = '\0';
+            if (text_width(font_id, cand) <= bw - 8 || !last_fit_end) {
+                snprintf(line, sizeof(line), "%s", cand);
+                last_fit_end = cursor;
+                if (text_width(font_id, cand) > bw - 8) break;
+            } else {
+                cursor = word_start;
+                break;
+            }
+        }
+        if (line_idx == max_lines - 1 && *cursor) {
+            size_t ll = strlen(line);
+            while (ll > 3) {
+                char ell[200];
+                snprintf(ell, sizeof(ell), "%.*s...", (int)ll, line);
+                if (text_width(font_id, ell) <= bw - 8) {
+                    snprintf(line, sizeof(line), "%.191s", ell);
+                    break;
+                }
+                ll--;
+            }
+        }
+        draw_text_centered(font_id, bx, by + line_idx * line_h, bw, line_h, line, color);
+        if (!last_fit_end) break;
+        p = last_fit_end;
+        line_idx++;
+    }
+}
+
 static void save_bmp(const char *path) {
     FILE *f = fopen(path, "wb");
     if (!f) return;
@@ -258,12 +340,14 @@ static void save_bmp(const char *path) {
 }
 
 /* ============================================================================
- * 3. BUILT-IN ROCK, BLUES & JAZZ STYLES (4/4 & 3/4) + PATTERNS
+ * 3. DISK-LOADED SONG STRUCTURES (*.song) & ROMAN NUMERAL PARSER
  * ============================================================================ */
 
-#define NUM_STYLES 6
-#define MAX_STEPS  8
-#define NUM_TRACKS 5
+#define MAX_SONGS        64
+#define MAX_SONG_BARS    32
+#define MAX_SECTION_ROWS 8
+#define MAX_STEPS        8
+#define NUM_TRACKS       5
 
 typedef enum {
     TRK_KICK  = 0,
@@ -282,158 +366,57 @@ static const char *k_bass_deg_labels[7] = {
 };
 
 typedef enum {
-    CHQ_MAJ  = 0,
-    CHQ_MIN  = 1,
-    CHQ_DOM7 = 2,
-    CHQ_MAJ7 = 3,
-    CHQ_MIN7 = 4
+    CHQ_MAJ    = 0,
+    CHQ_MIN    = 1,
+    CHQ_DOM7   = 2,
+    CHQ_MAJ7   = 3,
+    CHQ_MIN7   = 4,
+    CHQ_MIN7B5 = 5,
+    CHQ_DIM7   = 6,
+    CHQ_SUS4   = 7
 } BarChordQuality;
+
+typedef enum {
+    KIT_BLUES_SHUFFLE = 0,
+    KIT_SLOW_BLUES    = 1,
+    KIT_CLASSIC_ROCK  = 2,
+    KIT_ROCK_BALLAD   = 3,
+    KIT_JAZZ_SWING    = 4,
+    KIT_JAZZ_WALTZ    = 5,
+    KIT_BOSSA_NOVA    = 6,
+    KIT_POP_SOUL      = 7,
+    KIT_ACOUSTIC_FOLK = 8
+} GrooveKit;
 
 typedef struct {
     int             root_offset; /* Semitones above active Key root (0..11) */
     BarChordQuality qual;
-    const char     *roman;
+    char            roman[12];
 } BarChord;
 
 typedef struct {
-    const char *name;
-    const char *short_genre;
+    char        filename[64];
+    char        name[48];
+    char        short_genre[24];
+    char        examples[128];
     int         beats_per_bar;   /* 4 for 4/4 (8 steps), 3 for 3/4 (6 steps) */
     int         steps_per_bar;   /* 8 for 4/4, 6 for 3/4 */
     int         default_bpm;
     int         swing_pct;       /* 50 = Straight 8ths, 60..66 = Triplet Shuffle */
-    int         num_bars;        /* 4 or 12 bars in progression */
-    BarChord    bars[12];
-    const char *scale_name;
+    int         default_key_pc;  /* -1 if unspecified, else 0..11 */
+    GrooveKit   kit;
+    int         num_bars;        /* 1..MAX_SONG_BARS (typically 8, 12, or 16) */
+    BarChord    bars[MAX_SONG_BARS];
+    int         num_sections;
+    char        section_labels[MAX_SECTION_ROWS][8];
+    char        scale_name[64];
     uint8_t     scale_mask[12];  /* 1 = scale tone, 2 = characteristic blue/color note */
     uint8_t     default_steps[NUM_TRACKS][MAX_STEPS];
 } StylePreset;
 
-static const StylePreset k_styles[NUM_STYLES] = {
-    /* 0: Blues Shuffle 4/4 (12-Bar Blues, I7 - IV7 - V7, 65% Triplet Shuffle) */
-    {
-        "Blues Shuffle 4/4", "BLUES 4/4", 4, 8, 110, 65, 12,
-        {
-            { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  },
-            { 5, CHQ_DOM7, "IV7" }, { 5, CHQ_DOM7, "IV7" }, { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  },
-            { 7, CHQ_DOM7, "V7"  }, { 5, CHQ_DOM7, "IV7" }, { 0, CHQ_DOM7, "I7"  }, { 7, CHQ_DOM7, "V7"  }
-        },
-        "Minor Pentatonic + Blues (1 b3 4 b5 5 b7)",
-        { 1, 0, 0, 1, 0, 1, 2, 1, 0, 0, 1, 0 },
-        {
-            /* steps:   1  &  2  &  3  &  4  &  */
-            /* KICK */ { 2, 0, 0, 0, 1, 0, 0, 1 },
-            /* SNARE*/ { 0, 0, 2, 0, 0, 0, 2, 0 },
-            /* CLHAT*/ { 2, 1, 2, 1, 2, 1, 2, 1 },
-            /* OPHAT*/ { 0, 0, 0, 0, 0, 0, 0, 0 },
-            /* BASS */ { 1, 3, 4, 3, 1, 3, 4, 5 }  /* Classic Blues Box: R-5-6-5 R-5-6-b7 */
-        }
-    },
-
-    /* 1: Slow Blues 3/4 (12-Bar Waltz Blues in 3/4, 1 & 2 & 3 &) */
-    {
-        "Slow Blues 3/4", "BLUES 3/4", 3, 6, 86, 62, 12,
-        {
-            { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  },
-            { 5, CHQ_DOM7, "IV7" }, { 5, CHQ_DOM7, "IV7" }, { 0, CHQ_DOM7, "I7"  }, { 0, CHQ_DOM7, "I7"  },
-            { 7, CHQ_DOM7, "V7"  }, { 5, CHQ_DOM7, "IV7" }, { 0, CHQ_DOM7, "I7"  }, { 7, CHQ_DOM7, "V7"  }
-        },
-        "Minor Pentatonic + Blues (1 b3 4 b5 5 b7)",
-        { 1, 0, 0, 1, 0, 1, 2, 1, 0, 0, 1, 0 },
-        {
-            /* steps:   1  &  2  &  3  &       */
-            /* KICK */ { 2, 0, 0, 1, 0, 0, 0, 0 },
-            /* SNARE*/ { 0, 0, 0, 0, 2, 0, 0, 0 },
-            /* CLHAT*/ { 2, 1, 1, 1, 1, 0, 0, 0 },
-            /* OPHAT*/ { 0, 0, 0, 0, 0, 1, 0, 0 },
-            /* BASS */ { 1, 2, 3, 4, 3, 2, 0, 0 }  /* 3/4 Blues Arpeggio: R-3-5-6-5-3 */
-        }
-    },
-
-    /* 2: Classic Rock 4/4 (Straight 8ths, I - bVII - IV - I) */
-    {
-        "Classic Rock 4/4", "ROCK 4/4", 4, 8, 120, 50, 4,
-        {
-            {  0, CHQ_MAJ, "I"    },
-            { 10, CHQ_MAJ, "bVII" },
-            {  5, CHQ_MAJ, "IV"   },
-            {  0, CHQ_MAJ, "I"    }
-        },
-        "Mixolydian / Rock Pentatonic (1 2 3 4 5 6 b7)",
-        { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 2, 0 },
-        {
-            /* steps:   1  &  2  &  3  &  4  &  */
-            /* KICK */ { 2, 0, 0, 1, 2, 0, 0, 0 },
-            /* SNARE*/ { 0, 0, 2, 0, 0, 0, 2, 0 },
-            /* CLHAT*/ { 2, 1, 2, 1, 2, 1, 2, 0 },
-            /* OPHAT*/ { 0, 0, 0, 0, 0, 0, 0, 1 },
-            /* BASS */ { 1, 1, 1, 3, 1, 1, 6, 3 }  /* Driving 8th Rock Bass: R-R-R-5 R-R-8-5 */
-        }
-    },
-
-    /* 3: Rock Ballad 3/4 (3/4 Time, i - bVI - bVII - V7) */
-    {
-        "Rock Ballad 3/4", "ROCK 3/4", 3, 6, 98, 50, 4,
-        {
-            {  0, CHQ_MIN,  "i"    },
-            {  8, CHQ_MAJ,  "bVI"  },
-            { 10, CHQ_MAJ,  "bVII" },
-            {  7, CHQ_DOM7, "V7"   }
-        },
-        "Natural Minor / Aeolian (1 2 b3 4 5 b6 b7)",
-        { 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0 },
-        {
-            /* steps:   1  &  2  &  3  &       */
-            /* KICK */ { 2, 0, 0, 1, 0, 0, 0, 0 },
-            /* SNARE*/ { 0, 0, 0, 0, 2, 0, 0, 0 },
-            /* CLHAT*/ { 2, 1, 1, 1, 2, 0, 0, 0 },
-            /* OPHAT*/ { 0, 0, 0, 0, 0, 1, 0, 0 },
-            /* BASS */ { 1, 1, 3, 3, 6, 3, 0, 0 }  /* 3/4 Rock Bass: R-R-5-5-8-5 */
-        }
-    },
-
-    /* 4: Jazz Swing 4/4 (ii7 - V7 - Imaj7 - VI7, Walking Quarter-Note Bass) */
-    {
-        "Jazz Swing 4/4", "JAZZ 4/4", 4, 8, 126, 63, 4,
-        {
-            { 2, CHQ_MIN7, "ii7"   },
-            { 7, CHQ_DOM7, "V7"    },
-            { 0, CHQ_MAJ7, "Imaj7" },
-            { 9, CHQ_DOM7, "VI7"   }
-        },
-        "Major / Jazz Bebop Modes (1 2 3 4 5 6 7)",
-        { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 },
-        {
-            /* steps:   1  &  2  &  3  &  4  &  */
-            /* KICK */ { 1, 0, 0, 0, 1, 0, 0, 0 },
-            /* SNARE*/ { 0, 0, 0, 1, 0, 0, 0, 1 },
-            /* CLHAT*/ { 0, 0, 2, 0, 0, 0, 2, 0 }, /* Hi-hat pedal chick on Beats 2 and 4 */
-            /* OPHAT*/ { 2, 0, 1, 1, 2, 0, 1, 1 }, /* Jazz Ride spang-a-lang: 1, 2 &, 3, 4 & */
-            /* BASS */ { 1, 0, 2, 0, 3, 0, 5, 0 }  /* Quarter-note Walking Jazz Bass: R-3-5-b7 */
-        }
-    },
-
-    /* 5: Jazz Waltz 3/4 (Imaj7 - vi7 - ii7 - V7 in 3/4 Swing) */
-    {
-        "Jazz Waltz 3/4", "JAZZ 3/4", 3, 6, 132, 60, 4,
-        {
-            { 0, CHQ_MAJ7, "Imaj7" },
-            { 9, CHQ_MIN7, "vi7"   },
-            { 2, CHQ_MIN7, "ii7"   },
-            { 7, CHQ_DOM7, "V7"    }
-        },
-        "Major / Lydian Waltz (1 2 3 4 5 6 7)",
-        { 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1 },
-        {
-            /* steps:   1  &  2  &  3  &       */
-            /* KICK */ { 1, 0, 0, 0, 0, 0, 0, 0 },
-            /* SNARE*/ { 0, 0, 0, 1, 0, 0, 0, 0 },
-            /* CLHAT*/ { 0, 0, 2, 0, 0, 0, 0, 0 }, /* Hi-hat chick on Beat 2 */
-            /* OPHAT*/ { 2, 0, 1, 1, 1, 0, 0, 0 }, /* Jazz Waltz Ride: 1, 2 &, 3 */
-            /* BASS */ { 1, 0, 2, 0, 3, 4, 0, 0 }  /* 3/4 Walking Waltz Bass: R . 3 . 5 6 */
-        }
-    }
-};
+static StylePreset g_songs[MAX_SONGS];
+static int         g_num_songs = 0;
+static char        g_songs_dir[512] = "";
 
 static const char *k_note_names[12] = {
     "C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"
@@ -446,6 +429,453 @@ static const char *k_interval_labels[12] = {
 /* Standard guitar string pitch classes from top row (high e) to bottom row (low E) */
 static const char *k_gtr_str_lbl[6]  = { "e", "B", "G", "D", "A", "E" };
 static const int   k_gtr_str_pc[6]   = { 4, 11, 7, 2, 9, 4 };
+
+static bool pb_streq_ci(const char *a, const char *b) {
+    while (*a && *b) {
+        if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return false;
+        a++; b++;
+    }
+    return (*a == '\0' && *b == '\0');
+}
+
+static bool pb_ends_with_ci(const char *str, const char *suf) {
+    size_t sl = strlen(str), fl = strlen(suf);
+    if (sl < fl) return false;
+    return pb_streq_ci(str + sl - fl, suf);
+}
+
+static char *pb_trim(char *s) {
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) {
+        s[--len] = '\0';
+    }
+    return s;
+}
+
+static int parse_key_pc_token(const char *tok) {
+    if (!tok || !tok[0]) return -1;
+    static const struct { const char *n; int pc; } k_map[] = {
+        { "C", 0 }, { "B#", 0 },
+        { "C#", 1 }, { "Db", 1 },
+        { "D", 2 },
+        { "D#", 3 }, { "Eb", 3 },
+        { "E", 4 }, { "Fb", 4 },
+        { "F", 5 }, { "E#", 5 },
+        { "F#", 6 }, { "Gb", 6 },
+        { "G", 7 },
+        { "G#", 8 }, { "Ab", 8 },
+        { "A", 9 },
+        { "A#", 10 }, { "Bb", 10 },
+        { "B", 11 }, { "Cb", 11 }
+    };
+    for (size_t i = 0; i < sizeof(k_map) / sizeof(k_map[0]); i++) {
+        if (pb_streq_ci(tok, k_map[i].n)) return k_map[i].pc;
+    }
+    return -1;
+}
+
+static GrooveKit parse_kit_name(const char *val) {
+    if (!val || !val[0]) return KIT_BLUES_SHUFFLE;
+    if (pb_streq_ci(val, "blues_shuffle") || pb_streq_ci(val, "blues")) return KIT_BLUES_SHUFFLE;
+    if (pb_streq_ci(val, "slow_blues")    || pb_streq_ci(val, "blues_waltz")) return KIT_SLOW_BLUES;
+    if (pb_streq_ci(val, "classic_rock")  || pb_streq_ci(val, "rock")) return KIT_CLASSIC_ROCK;
+    if (pb_streq_ci(val, "rock_ballad")   || pb_streq_ci(val, "ballad")) return KIT_ROCK_BALLAD;
+    if (pb_streq_ci(val, "jazz_swing")    || pb_streq_ci(val, "jazz")) return KIT_JAZZ_SWING;
+    if (pb_streq_ci(val, "jazz_waltz"))   return KIT_JAZZ_WALTZ;
+    if (pb_streq_ci(val, "bossa_nova")    || pb_streq_ci(val, "bossa") || pb_streq_ci(val, "latin")) return KIT_BOSSA_NOVA;
+    if (pb_streq_ci(val, "pop_soul")      || pb_streq_ci(val, "soul")  || pb_streq_ci(val, "pop")) return KIT_POP_SOUL;
+    if (pb_streq_ci(val, "acoustic_folk") || pb_streq_ci(val, "folk")  || pb_streq_ci(val, "acoustic")) return KIT_ACOUSTIC_FOLK;
+    return KIT_BLUES_SHUFFLE;
+}
+
+static bool parse_roman_chord(const char *tok, BarChord *out) {
+    if (!tok || !tok[0] || !out) return false;
+    const char *p = tok;
+    int acc = 0;
+    if (*p == 'b') { acc = -1; p++; }
+    else if (*p == '#') { acc = 1; p++; }
+
+    int base_off = -1;
+    int deg_len = 0;
+    bool is_upper = isupper((unsigned char)p[0]) != 0;
+
+    static const struct { const char *rom; int off; int len; } k_romans[] = {
+        { "VII", 11, 3 }, { "III", 4, 3 },
+        { "VI",   9, 2 }, { "IV",  5, 2 }, { "II", 2, 2 },
+        { "V",    7, 1 }, { "I",   0, 1 }
+    };
+    for (size_t i = 0; i < sizeof(k_romans) / sizeof(k_romans[0]); i++) {
+        int l = k_romans[i].len;
+        bool match = true;
+        for (int k = 0; k < l; k++) {
+            if (!p[k] || toupper((unsigned char)p[k]) != k_romans[i].rom[k]) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            base_off = k_romans[i].off;
+            deg_len = l;
+            break;
+        }
+    }
+    if (base_off < 0) return false;
+    p += deg_len;
+
+    BarChordQuality q;
+    if (strcmp(p, "") == 0) {
+        q = is_upper ? CHQ_MAJ : CHQ_MIN;
+    } else if (pb_streq_ci(p, "m7b5") || pb_streq_ci(p, "7b5") ||
+               pb_streq_ci(p, "hdim7") || pb_streq_ci(p, "-7b5")) {
+        q = CHQ_MIN7B5;
+    } else if (pb_streq_ci(p, "dim7") || pb_streq_ci(p, "dim") ||
+               pb_streq_ci(p, "o7") || pb_streq_ci(p, "o")) {
+        q = CHQ_DIM7;
+    } else if (strcmp(p, "maj7") == 0 || strcmp(p, "MAJ7") == 0 || strcmp(p, "M7") == 0) {
+        q = CHQ_MAJ7;
+    } else if (strcmp(p, "m7") == 0 || pb_streq_ci(p, "min7") || strcmp(p, "-7") == 0) {
+        q = CHQ_MIN7;
+    } else if (strcmp(p, "7") == 0) {
+        q = is_upper ? CHQ_DOM7 : CHQ_MIN7;
+    } else if (pb_streq_ci(p, "sus4") || pb_streq_ci(p, "sus")) {
+        q = CHQ_SUS4;
+    } else if (strcmp(p, "m") == 0 || pb_streq_ci(p, "min") || strcmp(p, "-") == 0) {
+        q = CHQ_MIN;
+    } else {
+        return false;
+    }
+
+    out->root_offset = (base_off + acc + 12) % 12;
+    out->qual = q;
+    snprintf(out->roman, sizeof(out->roman), "%.11s", tok);
+    return true;
+}
+
+static void parse_scale_line(const char *val, uint8_t mask[12]) {
+    memset(mask, 0, 12);
+    char buf[192];
+    snprintf(buf, sizeof(buf), "%s", val ? val : "");
+    char *p = buf;
+    while (*p) {
+        while (*p && (isspace((unsigned char)*p) || *p == ',' || *p == '|')) p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && !isspace((unsigned char)*p) && *p != ',' && *p != '|') p++;
+        if (*p) *p++ = '\0';
+
+        uint8_t mv = 1;
+        if (*start == '*') { mv = 2; start++; }
+
+        int semi = -1;
+        if (pb_streq_ci(start, "1") || pb_streq_ci(start, "R")) semi = 0;
+        else if (pb_streq_ci(start, "b2") || pb_streq_ci(start, "#1")) semi = 1;
+        else if (pb_streq_ci(start, "2")) semi = 2;
+        else if (pb_streq_ci(start, "b3") || pb_streq_ci(start, "#2")) semi = 3;
+        else if (pb_streq_ci(start, "3")) semi = 4;
+        else if (pb_streq_ci(start, "4")) semi = 5;
+        else if (pb_streq_ci(start, "b5") || pb_streq_ci(start, "#4")) semi = 6;
+        else if (pb_streq_ci(start, "5")) semi = 7;
+        else if (pb_streq_ci(start, "b6") || pb_streq_ci(start, "#5")) semi = 8;
+        else if (pb_streq_ci(start, "6")) semi = 9;
+        else if (pb_streq_ci(start, "b7") || pb_streq_ci(start, "#6")) semi = 10;
+        else if (pb_streq_ci(start, "7")) semi = 11;
+
+        if (semi >= 0 && semi < 12) {
+            if (mv > mask[semi]) mask[semi] = mv;
+        }
+    }
+    mask[0] = 1; /* Always include root */
+}
+
+static void parse_drum_row(const char *val, uint8_t out_steps[MAX_STEPS]) {
+    memset(out_steps, 0, MAX_STEPS);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s", val ? val : "");
+    char *p = buf;
+    int idx = 0;
+    while (*p && idx < MAX_STEPS) {
+        while (*p && (isspace((unsigned char)*p) || *p == '|' || *p == ',')) p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && !isspace((unsigned char)*p) && *p != '|' && *p != ',') p++;
+        if (*p) *p++ = '\0';
+
+        if (strcmp(start, ".") == 0 || strcmp(start, "-") == 0 || strcmp(start, "0") == 0) {
+            out_steps[idx++] = 0;
+        } else if (strcmp(start, "2") == 0 || strcmp(start, "X") == 0) {
+            out_steps[idx++] = 2;
+        } else if (strcmp(start, "1") == 0 || strcmp(start, "x") == 0) {
+            out_steps[idx++] = 1;
+        } else {
+            out_steps[idx++] = 0;
+        }
+    }
+}
+
+static void parse_bass_row(const char *val, uint8_t out_steps[MAX_STEPS]) {
+    memset(out_steps, 0, MAX_STEPS);
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s", val ? val : "");
+    char *p = buf;
+    int idx = 0;
+    while (*p && idx < MAX_STEPS) {
+        while (*p && (isspace((unsigned char)*p) || *p == '|' || *p == ',')) p++;
+        if (!*p) break;
+        char *start = p;
+        while (*p && !isspace((unsigned char)*p) && *p != '|' && *p != ',') p++;
+        if (*p) *p++ = '\0';
+
+        uint8_t deg = 0;
+        if (strcmp(start, ".") == 0 || strcmp(start, "-") == 0 || strcmp(start, "0") == 0) deg = 0;
+        else if (pb_streq_ci(start, "R") || strcmp(start, "1") == 0) deg = 1;
+        else if (pb_streq_ci(start, "3") || pb_streq_ci(start, "b3")) deg = 2;
+        else if (pb_streq_ci(start, "5") || pb_streq_ci(start, "b5")) deg = 3;
+        else if (pb_streq_ci(start, "6") || pb_streq_ci(start, "b6")) deg = 4;
+        else if (pb_streq_ci(start, "b7") || pb_streq_ci(start, "7")) deg = 5;
+        else if (strcmp(start, "8") == 0) deg = 6;
+        out_steps[idx++] = deg;
+    }
+}
+
+static void strip_inline_comment(const char *key, char *val) {
+    bool is_chords = pb_streq_ci(key, "chords") || pb_streq_ci(key, "bars");
+    bool is_scale  = pb_streq_ci(key, "scale");
+    for (char *p = val; *p; p++) {
+        if (*p != '#') continue;
+        /* Preserve musical sharps: note names (F#, C#), marked scale degrees (*#4),
+         * sharp Roman numerals on chords lines (#ivdim7, #IV), and sharp scale degrees (#4). */
+        if (p > val && (isalpha((unsigned char)p[-1]) || p[-1] == '*')) continue;
+        if (is_chords && (p[1] == 'I' || p[1] == 'i' || p[1] == 'V' || p[1] == 'v')) continue;
+        if (is_scale && (p[1] >= '1' && p[1] <= '6')) continue;
+        *p = '\0';
+        break;
+    }
+}
+
+static bool load_song_file(const char *full_path, const char *filename, StylePreset *st) {
+    FILE *f = fopen(full_path, "r");
+    if (!f) return false;
+
+    memset(st, 0, sizeof(*st));
+    snprintf(st->filename, sizeof(st->filename), "%.63s", filename);
+    snprintf(st->short_genre, sizeof(st->short_genre), "CUSTOM");
+    snprintf(st->examples, sizeof(st->examples), "Custom progression (%.63s)", filename);
+    st->beats_per_bar  = 4;
+    st->steps_per_bar  = 8;
+    st->default_bpm    = 110;
+    st->swing_pct      = 50;
+    st->default_key_pc = -1;
+    st->kit            = KIT_BLUES_SHUFFLE;
+
+    bool has_scale = false;
+    bool has_pattern = false;
+
+    char line[512];
+    while (fgets(line, sizeof(line), f)) {
+        char *s = pb_trim(line);
+        if (!s[0] || s[0] == '#') continue; /* Full-line '#' comment or blank line */
+
+        char *eq = strchr(s, '=');
+        if (!eq) continue;
+        *eq = '\0';
+        char *key = pb_trim(s);
+        char *val = eq + 1;
+        strip_inline_comment(key, val);
+        val = pb_trim(val);
+        if (!key[0] || !val[0]) continue;
+
+        if (pb_streq_ci(key, "name") || pb_streq_ci(key, "title")) {
+            snprintf(st->name, sizeof(st->name), "%s", val);
+        } else if (pb_streq_ci(key, "genre") || pb_streq_ci(key, "short_genre")) {
+            snprintf(st->short_genre, sizeof(st->short_genre), "%s", val);
+        } else if (pb_streq_ci(key, "examples") || pb_streq_ci(key, "songs") || pb_streq_ci(key, "inspired_by")) {
+            snprintf(st->examples, sizeof(st->examples), "%s", val);
+        } else if (pb_streq_ci(key, "meter") || pb_streq_ci(key, "time_signature")) {
+            if (val[0] == '3') {
+                st->beats_per_bar = 3;
+                st->steps_per_bar = 6;
+            } else {
+                st->beats_per_bar = 4;
+                st->steps_per_bar = 8;
+            }
+        } else if (pb_streq_ci(key, "bpm") || pb_streq_ci(key, "tempo")) {
+            int b = atoi(val);
+            if (b < 45) b = 45;
+            if (b > 220) b = 220;
+            st->default_bpm = b;
+        } else if (pb_streq_ci(key, "swing")) {
+            int sw = atoi(val);
+            if (sw < 50) sw = 50;
+            if (sw > 68) sw = 68;
+            st->swing_pct = sw;
+        } else if (pb_streq_ci(key, "default_key") || pb_streq_ci(key, "key")) {
+            st->default_key_pc = parse_key_pc_token(val);
+        } else if (pb_streq_ci(key, "kit") || pb_streq_ci(key, "groove")) {
+            st->kit = parse_kit_name(val);
+        } else if (pb_streq_ci(key, "scale_name")) {
+            snprintf(st->scale_name, sizeof(st->scale_name), "%s", val);
+        } else if (pb_streq_ci(key, "scale")) {
+            parse_scale_line(val, st->scale_mask);
+            has_scale = true;
+        } else if (pb_streq_ci(key, "sections")) {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "%s", val);
+            char *p = buf;
+            while (*p && st->num_sections < MAX_SECTION_ROWS) {
+                while (*p && (isspace((unsigned char)*p) || *p == '|' || *p == ',')) p++;
+                if (!*p) break;
+                char *start = p;
+                while (*p && *p != '|' && *p != ',') p++;
+                if (*p) *p++ = '\0';
+                char *lbl = pb_trim(start);
+                if (lbl[0]) {
+                    snprintf(st->section_labels[st->num_sections++],
+                             sizeof(st->section_labels[0]), "%s", lbl);
+                }
+            }
+        } else if (pb_streq_ci(key, "chords") || pb_streq_ci(key, "bars")) {
+            char buf[512];
+            snprintf(buf, sizeof(buf), "%s", val);
+            char *p = buf;
+            while (*p && st->num_bars < MAX_SONG_BARS) {
+                while (*p && (isspace((unsigned char)*p) || *p == '|' || *p == ',')) p++;
+                if (!*p) break;
+                char *start = p;
+                while (*p && !isspace((unsigned char)*p) && *p != '|' && *p != ',') p++;
+                if (*p) *p++ = '\0';
+                BarChord bc;
+                if (parse_roman_chord(start, &bc)) {
+                    st->bars[st->num_bars++] = bc;
+                } else {
+                    fprintf(stderr, "pocketband: [%s] ignoring unrecognized chord token '%s'\n",
+                            filename, start);
+                }
+            }
+        } else if (pb_streq_ci(key, "kick")) {
+            parse_drum_row(val, st->default_steps[TRK_KICK]);
+            has_pattern = true;
+        } else if (pb_streq_ci(key, "snare")) {
+            parse_drum_row(val, st->default_steps[TRK_SNARE]);
+            has_pattern = true;
+        } else if (pb_streq_ci(key, "clhat")) {
+            parse_drum_row(val, st->default_steps[TRK_CLHAT]);
+            has_pattern = true;
+        } else if (pb_streq_ci(key, "ophat") || pb_streq_ci(key, "ride")) {
+            parse_drum_row(val, st->default_steps[TRK_OPHAT]);
+            has_pattern = true;
+        } else if (pb_streq_ci(key, "bass")) {
+            parse_bass_row(val, st->default_steps[TRK_BASS]);
+            has_pattern = true;
+        }
+    }
+    fclose(f);
+
+    if (st->num_bars <= 0) {
+        fprintf(stderr, "pocketband: skipping '%s' (no valid chords found)\n", filename);
+        return false;
+    }
+
+    if (st->name[0] == '\0') {
+        snprintf(st->name, sizeof(st->name), "%.47s", filename);
+        char *dot = strrchr(st->name, '.');
+        if (dot) *dot = '\0';
+    }
+
+    /* Sensible default solo scale if omitted in a minimal user file */
+    if (!has_scale) {
+        bool minor_tonic = (st->bars[0].qual == CHQ_MIN || st->bars[0].qual == CHQ_MIN7 ||
+                            st->bars[0].qual == CHQ_MIN7B5);
+        if (minor_tonic) {
+            parse_scale_line("1 2 b3 4 5 b6 b7", st->scale_mask);
+            if (!st->scale_name[0]) snprintf(st->scale_name, sizeof(st->scale_name), "Natural Minor (1 2 b3 4 5 b6 b7)");
+        } else {
+            parse_scale_line("1 2 3 4 5 6 7", st->scale_mask);
+            if (!st->scale_name[0]) snprintf(st->scale_name, sizeof(st->scale_name), "Major / Ionian (1 2 3 4 5 6 7)");
+        }
+    } else if (!st->scale_name[0]) {
+        snprintf(st->scale_name, sizeof(st->scale_name), "Custom Solo Scale");
+    }
+
+    /* Sensible default drum/bass groove if omitted in a minimal user file */
+    if (!has_pattern) {
+        if (st->beats_per_bar == 3) {
+            parse_drum_row("2 . . 1 . .", st->default_steps[TRK_KICK]);
+            parse_drum_row(". . . . 2 .", st->default_steps[TRK_SNARE]);
+            parse_drum_row("2 1 1 1 1 .", st->default_steps[TRK_CLHAT]);
+            parse_drum_row(". . . . . 1", st->default_steps[TRK_OPHAT]);
+            parse_bass_row("R . 3 . 5 .", st->default_steps[TRK_BASS]);
+        } else {
+            parse_drum_row("2 . . . 1 . . .", st->default_steps[TRK_KICK]);
+            parse_drum_row(". . 2 . . . 2 .", st->default_steps[TRK_SNARE]);
+            parse_drum_row("2 1 2 1 2 1 2 1", st->default_steps[TRK_CLHAT]);
+            parse_drum_row(". . . . . . . .", st->default_steps[TRK_OPHAT]);
+            parse_bass_row("R . 3 . 5 . 8 5", st->default_steps[TRK_BASS]);
+        }
+    }
+    return true;
+}
+
+static int cmp_song_filename(const void *a, const void *b) {
+    return strcmp((const char *)a, (const char *)b);
+}
+
+static int scan_songs_in_dir(const char *dir_path) {
+    if (!dir_path || !dir_path[0]) return 0;
+    DIR *dir = opendir(dir_path);
+    if (!dir) return 0;
+
+    char names[MAX_SONGS][64];
+    int count = 0;
+    struct dirent *de;
+    while ((de = readdir(dir)) != NULL && count < MAX_SONGS) {
+        if (de->d_name[0] == '.') continue; /* Skip '.', '..', and macOS '._*' dotfiles */
+        if (!pb_ends_with_ci(de->d_name, ".song")) continue;
+        snprintf(names[count], sizeof(names[count]), "%s", de->d_name);
+        count++;
+    }
+    closedir(dir);
+    if (count == 0) return 0;
+
+    qsort(names, (size_t)count, sizeof(names[0]), cmp_song_filename);
+
+    g_num_songs = 0;
+    for (int i = 0; i < count && g_num_songs < MAX_SONGS; i++) {
+        char full[768];
+        snprintf(full, sizeof(full), "%.511s/%.63s", dir_path, names[i]);
+        if (load_song_file(full, names[i], &g_songs[g_num_songs])) {
+            g_num_songs++;
+        }
+    }
+    if (g_num_songs > 0) {
+        snprintf(g_songs_dir, sizeof(g_songs_dir), "%s", dir_path);
+    }
+    return g_num_songs;
+}
+
+static int load_all_songs_from_disk(void) {
+    g_num_songs = 0;
+    const char *env_dir = getenv("POCKETBAND_SONGS_DIR");
+    if (env_dir && scan_songs_in_dir(env_dir) > 0) return g_num_songs;
+    if (scan_songs_in_dir("./songs") > 0) return g_num_songs;
+
+    /* Executable-relative <exe_dir>/songs fallback */
+    char exe_path[512];
+    ssize_t rlen = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (rlen > 0) {
+        exe_path[rlen] = '\0';
+        char *slash = strrchr(exe_path, '/');
+        if (slash) {
+            *slash = '\0';
+            char rel_dir[576];
+            snprintf(rel_dir, sizeof(rel_dir), "%s/songs", exe_path);
+            if (scan_songs_in_dir(rel_dir) > 0) return g_num_songs;
+        }
+    }
+
+    if (scan_songs_in_dir("/userdata/roms/ports/pocketband/songs") > 0) return g_num_songs;
+    return g_num_songs;
+}
 
 /* ============================================================================
  * 4. APPLICATION STATE & EDITABLE PATTERN GRID
@@ -462,28 +892,29 @@ typedef enum {
     MIX_DRUMS_ONLY = 2  /* Drums Only */
 } BackingMixMode;
 
-static ViewMode       g_view         = VIEW_JAM;
-static BackingMixMode g_mix_mode     = MIX_FULL_BAND;
-static bool           g_show_help    = false;
-static bool           g_neck_notes   = false; /* false = Intervals (R,b3,4,5,b7), true = Note Names (A,C,D,E,G) */
+static ViewMode       g_view           = VIEW_JAM;
+static BackingMixMode g_mix_mode       = MIX_FULL_BAND;
+static bool           g_show_help      = false;
+static bool           g_show_fretboard = false;
+static bool           g_neck_notes     = false; /* false = Intervals (R,b3,4,5,b7), true = Note Names (A,C,D,E,G) */
 
-static int            g_style_idx    = 0;     /* Default: Blues Shuffle 4/4 */
-static int            g_key_pc       = 9;     /* Default Key: A (9) */
-static int            g_bpm          = 110;
-static int            g_swing_pct    = 65;
-static bool           g_auto_fill    = true;
-static bool           g_fill_queued  = false;
+static int            g_style_idx      = 0;     /* Active disk-loaded song index */
+static int            g_key_pc         = 9;     /* Default Key: A (9) */
+static int            g_bpm            = 110;
+static int            g_swing_pct      = 65;
+static bool           g_auto_fill      = true;
+static bool           g_fill_queued    = false;
 
-static uint8_t        g_pattern[NUM_STYLES][NUM_TRACKS][MAX_STEPS];
+static uint8_t        g_pattern[MAX_SONGS][NUM_TRACKS][MAX_STEPS];
 
 /* Sequencer Transport State (shared with background audio thread) */
-static volatile bool  g_playing      = true;
-static volatile int   g_cur_bar      = 0;
-static volatile int   g_cur_step     = 0;
+static volatile bool  g_playing        = true;
+static volatile int   g_cur_bar        = 0;
+static volatile int   g_cur_step       = 0;
 
 /* Step Editor Cursor */
-static int            g_edit_track   = 0;
-static int            g_edit_step    = 0;
+static int            g_edit_track     = 0;
+static int            g_edit_step      = 0;
 
 static char           g_config_path[512] = "";
 
@@ -491,13 +922,56 @@ static void format_chord_label(int key_pc, const BarChord *bc, char *buf, size_t
     int pc = (key_pc + bc->root_offset) % 12;
     const char *suf = "";
     switch (bc->qual) {
-        case CHQ_MAJ:  suf = "";     break;
-        case CHQ_MIN:  suf = "m";    break;
-        case CHQ_DOM7: suf = "7";    break;
-        case CHQ_MAJ7: suf = "maj7"; break;
-        case CHQ_MIN7: suf = "m7";   break;
+        case CHQ_MAJ:    suf = "";     break;
+        case CHQ_MIN:    suf = "m";    break;
+        case CHQ_DOM7:   suf = "7";    break;
+        case CHQ_MAJ7:   suf = "maj7"; break;
+        case CHQ_MIN7:   suf = "m7";   break;
+        case CHQ_MIN7B5: suf = "m7b5"; break;
+        case CHQ_DIM7:   suf = "dim7"; break;
+        case CHQ_SUS4:   suf = "sus4"; break;
     }
     snprintf(buf, sz, "%s%s", k_note_names[pc], suf);
+}
+
+static void format_chord_tones(int key_pc, const BarChord *bc, char *buf, size_t sz) {
+    int root_pc  = (key_pc + bc->root_offset) % 12;
+    int third_semi = (bc->qual == CHQ_SUS4) ? 5 :
+                     (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7 ||
+                      bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) ? 3 : 4;
+    int fifth_semi = (bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) ? 6 : 7;
+    int third_pc = (root_pc + third_semi) % 12;
+    int fifth_pc = (root_pc + fifth_semi) % 12;
+
+    if (bc->qual == CHQ_DOM7 || bc->qual == CHQ_MAJ7 || bc->qual == CHQ_MIN7 ||
+        bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) {
+        int sev_semi = (bc->qual == CHQ_MAJ7) ? 11 : (bc->qual == CHQ_DIM7) ? 9 : 10;
+        int sev_pc = (root_pc + sev_semi) % 12;
+        snprintf(buf, sz, "%s - %s - %s - %s",
+                 k_note_names[root_pc], k_note_names[third_pc],
+                 k_note_names[fifth_pc], k_note_names[sev_pc]);
+    } else {
+        snprintf(buf, sz, "%s - %s - %s",
+                 k_note_names[root_pc], k_note_names[third_pc], k_note_names[fifth_pc]);
+    }
+}
+
+static int bass_degree_semitone_offset(const BarChord *bc, uint8_t bass_deg) {
+    int third_semi = (bc->qual == CHQ_SUS4) ? 5 :
+                     (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7 ||
+                      bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) ? 3 : 4;
+    int fifth_semi = (bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) ? 6 : 7;
+    int sixth_semi = (bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) ? 8 : 9;
+    int sev_semi   = (bc->qual == CHQ_MAJ7) ? 11 : (bc->qual == CHQ_DIM7) ? 9 : 10;
+    switch (bass_deg) {
+        case 1: return 0;
+        case 2: return third_semi;
+        case 3: return fifth_semi;
+        case 4: return sixth_semi;
+        case 5: return sev_semi;
+        case 6: return 12;
+        default: return 0;
+    }
 }
 
 static void format_bass_pitch_name(int key_pc, const BarChord *bc, uint8_t bass_deg, char *buf, size_t sz) {
@@ -506,16 +980,7 @@ static void format_bass_pitch_name(int key_pc, const BarChord *bc, uint8_t bass_
         return;
     }
     int chord_root_pc = (key_pc + bc->root_offset) % 12;
-    int third_semi = (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7) ? 3 : 4;
-    int semitone_off = 0;
-    switch (bass_deg) {
-        case 1: semitone_off = 0;          break;
-        case 2: semitone_off = third_semi; break;
-        case 3: semitone_off = 7;          break;
-        case 4: semitone_off = 9;          break;
-        case 5: semitone_off = 10;         break;
-        case 6: semitone_off = 12;         break;
-    }
+    int semitone_off = bass_degree_semitone_offset(bc, bass_deg);
     int note_pc = (chord_root_pc + semitone_off) % 12;
     snprintf(buf, sz, "%s (%s)", k_bass_deg_labels[bass_deg], k_note_names[note_pc]);
 }
@@ -706,12 +1171,26 @@ static void sf2_set_prog_fallback(int channel, int bank, int pref1, int pref2, i
     if (idx >= 0) tsf_channel_set_presetindex(g_sf2.synth, channel, idx);
 }
 
-static int style_chord_is_guitar(int style_id) {
-    return (style_id == 1 || style_id == 2 || style_id == 3 || style_id == 4);
+static bool kit_chord_is_guitar(GrooveKit kit) {
+    return (kit == KIT_SLOW_BLUES || kit == KIT_CLASSIC_ROCK ||
+            kit == KIT_ROCK_BALLAD || kit == KIT_JAZZ_SWING ||
+            kit == KIT_BOSSA_NOVA || kit == KIT_ACOUSTIC_FOLK);
+}
+
+static bool kit_is_jazz_ride(GrooveKit kit) {
+    return (kit == KIT_JAZZ_SWING || kit == KIT_JAZZ_WALTZ || kit == KIT_BOSSA_NOVA);
+}
+
+static bool kit_has_organ_pad(GrooveKit kit) {
+    return (kit == KIT_SLOW_BLUES || kit == KIT_CLASSIC_ROCK ||
+            kit == KIT_ROCK_BALLAD || kit == KIT_POP_SOUL);
 }
 
 static void sf2_configure_style_instruments(int style_id) {
-    if (!rg35_sf2_ready(&g_sf2)) return;
+    if (!rg35_sf2_ready(&g_sf2) || g_num_songs <= 0) return;
+    if (style_id < 0 || style_id >= g_num_songs) style_id = 0;
+    GrooveKit kit = g_songs[style_id].kit;
+
     int drum_pref1 = 0, drum_pref2 = 0;
     int bass_prog  = 33;
     int chord_p1   = 4, chord_p2 = 27;
@@ -720,36 +1199,36 @@ static void sf2_configure_style_instruments(int style_id) {
     float bass_vol  = 0.92f;
     float drum_vol  = 0.96f;
 
-    switch (style_id) {
-        case 0: /* Blues Shuffle 4/4: Room/Standard Kit, Finger Bass, Tine E.Piano */
+    switch (kit) {
+        case KIT_BLUES_SHUFFLE:
             drum_pref1 = 8; drum_pref2 = 0;
             bass_prog  = 33;
             chord_p1   = 4; chord_p2 = 27;
             organ_prog = -1;
             chord_vol  = 0.74f;
             break;
-        case 1: /* Slow Blues 3/4: Room/Standard Kit, Finger Bass, Clean Guitar + Tonewheel Organ */
+        case KIT_SLOW_BLUES:
             drum_pref1 = 8; drum_pref2 = 0;
             bass_prog  = 33;
             chord_p1   = 27; chord_p2 = 26;
             organ_prog = 16;
             chord_vol  = 0.72f;
             break;
-        case 2: /* Classic Rock 4/4: Power/Standard Kit, Picked Bass, Overdrive/Clean Guitar + Rock Organ */
+        case KIT_CLASSIC_ROCK:
             drum_pref1 = 16; drum_pref2 = 0;
             bass_prog  = 34;
             chord_p1   = 29; chord_p2 = 27;
             organ_prog = 18;
             chord_vol  = 0.68f;
             break;
-        case 3: /* Rock Ballad 3/4: Standard Kit, Picked Bass, Clean Guitar + Rock Organ */
+        case KIT_ROCK_BALLAD:
             drum_pref1 = 0; drum_pref2 = 8;
             bass_prog  = 34;
             chord_p1   = 27; chord_p2 = 25;
             organ_prog = 18;
             chord_vol  = 0.72f;
             break;
-        case 4: /* Jazz Swing 4/4: Jazz Kit, Acoustic Upright Bass, Jazz Hollowbody Guitar */
+        case KIT_JAZZ_SWING:
             drum_pref1 = 32; drum_pref2 = 0;
             bass_prog  = 32;
             chord_p1   = 26; chord_p2 = 4;
@@ -757,11 +1236,35 @@ static void sf2_configure_style_instruments(int style_id) {
             chord_vol  = 0.76f;
             drum_vol   = 0.88f;
             break;
-        case 5: /* Jazz Waltz 3/4: Brush/Jazz Kit, Acoustic Upright Bass, Tine E.Piano */
-        default:
+        case KIT_JAZZ_WALTZ:
             drum_pref1 = 40; drum_pref2 = 32;
             bass_prog  = 32;
             chord_p1   = 4; chord_p2 = 26;
+            organ_prog = -1;
+            chord_vol  = 0.76f;
+            drum_vol   = 0.86f;
+            break;
+        case KIT_BOSSA_NOVA:
+            drum_pref1 = 40; drum_pref2 = 32;
+            bass_prog  = 32;
+            chord_p1   = 24; chord_p2 = 27; /* Nylon Guitar -> Clean Guitar fallback */
+            organ_prog = -1;
+            chord_vol  = 0.78f;
+            drum_vol   = 0.84f;
+            break;
+        case KIT_POP_SOUL:
+            drum_pref1 = 0; drum_pref2 = 8;
+            bass_prog  = 33;
+            chord_p1   = 4; chord_p2 = 27;
+            organ_prog = 16;
+            chord_vol  = 0.74f;
+            drum_vol   = 0.90f;
+            break;
+        case KIT_ACOUSTIC_FOLK:
+        default:
+            drum_pref1 = 40; drum_pref2 = 0;
+            bass_prog  = 32;
+            chord_p1   = 25; chord_p2 = 27; /* Steel Acoustic -> Clean Guitar fallback */
             organ_prog = -1;
             chord_vol  = 0.76f;
             drum_vol   = 0.86f;
@@ -890,16 +1393,7 @@ static void sf2_release_channel(int channel) {
 static int compute_bass_midi(int key_pc, const BarChord *bc, uint8_t bass_deg) {
     if (bass_deg == 0 || bass_deg > 6 || !bc) return -1;
     int chord_root_pc = (key_pc + bc->root_offset) % 12;
-    int third_semi = (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7) ? 3 : 4;
-    int semitone_off = 0;
-    switch (bass_deg) {
-        case 1: semitone_off = 0;          break; /* R  */
-        case 2: semitone_off = third_semi; break; /* 3  */
-        case 3: semitone_off = 7;          break; /* 5  */
-        case 4: semitone_off = 9;          break; /* 6  */
-        case 5: semitone_off = 10;         break; /* b7 */
-        case 6: semitone_off = 12;         break; /* 8  */
-    }
+    int semitone_off = bass_degree_semitone_offset(bc, bass_deg);
     int base_midi = 28 + ((chord_root_pc - 4 + 12) % 12);
     return base_midi + semitone_off;
 }
@@ -933,15 +1427,21 @@ static void sort3_int(int a[3]) {
 /* Smooth 4-voice chord voice leading minimizing semitone movement across bar changes */
 static void compute_voice_led_chord(int key_pc, const BarChord *bc, int out_midi[4]) {
     int root_pc  = (key_pc + bc->root_offset) % 12;
-    int third_pc = (root_pc + ((bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7) ? 3 : 4)) % 12;
-    int fifth_pc = (root_pc + 7) % 12;
+    int third_semi = (bc->qual == CHQ_SUS4) ? 5 :
+                     (bc->qual == CHQ_MIN || bc->qual == CHQ_MIN7 ||
+                      bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) ? 3 : 4;
+    int fifth_semi = (bc->qual == CHQ_MIN7B5 || bc->qual == CHQ_DIM7) ? 6 : 7;
+    int third_pc = (root_pc + third_semi) % 12;
+    int fifth_pc = (root_pc + fifth_semi) % 12;
     int sev_pc;
     if (bc->qual == CHQ_MAJ7) {
         sev_pc = (root_pc + 11) % 12;
-    } else if (bc->qual == CHQ_DOM7 || bc->qual == CHQ_MIN7) {
+    } else if (bc->qual == CHQ_DOM7 || bc->qual == CHQ_MIN7 || bc->qual == CHQ_MIN7B5) {
         sev_pc = (root_pc + 10) % 12;
+    } else if (bc->qual == CHQ_DIM7) {
+        sev_pc = (root_pc + 9) % 12;
     } else {
-        sev_pc = (root_pc + 2) % 12; /* Add 9th for lush 4-voice triad comping */
+        sev_pc = (root_pc + 2) % 12; /* Add 9th for lush 4-voice triad/sus4 comping */
     }
 
     int target_center = 61;
@@ -993,15 +1493,27 @@ static void compute_voice_led_chord(int key_pc, const BarChord *bc, int out_midi
     g_synth.prev_voicing_valid = true;
 }
 
-static float style_comping_velocity(int style_id, int beats_per_bar, int bar_idx,
+static float style_comping_velocity(GrooveKit kit, int beats_per_bar, int bar_idx,
                                     int step_idx, bool next_changes) {
     int spb = beats_per_bar * 2;
     /* Subtle Beat-4 '&' (or Beat-3 '&') harmonic anticipation before a chord change */
     if (step_idx == spb - 1 && (next_changes || (bar_idx % 2 == 1))) {
         return 0.64f;
     }
-    /* Jazz Swing (style 4): Charleston comping + bar-2 syncopated phrasing */
-    if (style_id == 4) {
+    /* Bossa Nova: syncopated bossa clave guitar comping */
+    if (kit == KIT_BOSSA_NOVA && beats_per_bar == 4) {
+        if (bar_idx % 2 == 0) {
+            if (step_idx == 0) return 0.72f;
+            if (step_idx == 3) return 0.64f;
+            if (step_idx == 6) return 0.60f;
+        } else {
+            if (step_idx == 1) return 0.62f;
+            if (step_idx == 4) return 0.66f;
+        }
+        return 0.0f;
+    }
+    /* Jazz Swing: Charleston comping + bar-2 syncopated phrasing */
+    if (kit == KIT_JAZZ_SWING) {
         if (bar_idx % 2 == 0) {
             if (step_idx == 0) return 0.72f;
             if (step_idx == 3) return 0.66f;
@@ -1027,7 +1539,9 @@ static float style_comping_velocity(int style_id, int beats_per_bar, int bar_idx
 }
 
 static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub_step) {
-    const StylePreset *st = &k_styles[style_id];
+    if (g_num_songs <= 0) return;
+    if (style_id < 0 || style_id >= g_num_songs) style_id = 0;
+    const StylePreset *st = &g_songs[style_id];
     const BarChord *cur_bc  = &st->bars[bar_idx % st->num_bars];
     const BarChord *next_bc = &st->bars[(bar_idx + 1) % st->num_bars];
     bool next_changes = (cur_bc->root_offset != next_bc->root_offset) || (cur_bc->qual != next_bc->qual);
@@ -1036,7 +1550,8 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
     bool is_fill_bar = ((bar_idx + 1) % 4 == 0 && g_auto_fill) || g_fill_queued;
     bool is_turnaround = ((bar_idx + 1) == st->num_bars) && is_fill_bar;
     int fill_start = is_turnaround ? (spb >= 4 ? spb - 4 : 0) : (spb >= 2 ? spb - 2 : 0);
-    bool is_jazz = (style_id == 4 || style_id == 5);
+    GrooveKit kit = st->kit;
+    bool is_jazz = kit_is_jazz_ride(kit);
     bool use_sf2 = rg35_sf2_ready(&g_sf2);
 
     if (use_sf2 && g_synth.sf2_configured_style != style_id) {
@@ -1071,10 +1586,10 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
         } else {
             /* Subtle 16th-note ghost snare on odd bars (Blues / Rock / Jazz pocket) */
             bool ghost = ((bar_idx % 2 == 1) && (step_idx == 3 || step_idx == spb - 1)) ||
-                         (style_id == 0 && step_idx == 1 && (bar_idx % 4 == 2));
+                         (kit == KIT_BLUES_SHUFFLE && step_idx == 1 && (bar_idx % 4 == 2));
             if (ghost) {
                 if (use_sf2) {
-                    int gnote = (style_id == 5) ? GM_SIDE_STICK : GM_SNARE_1;
+                    int gnote = (kit == KIT_JAZZ_WALTZ || kit == KIT_BOSSA_NOVA) ? GM_SIDE_STICK : GM_SNARE_1;
                     sf2_schedule_note(humanize_micro_delay(3), PB_CH_DRUM_KIT, gnote,
                                       humanize_vel(0.28f, 0.04f), (SAMPLE_RATE * 240) / 1000, false);
                 } else {
@@ -1116,7 +1631,7 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
 
     /* Subtle bar-2 syncopated kick pickup on Blues / Classic Rock */
     if (!is_fill_bar && (bar_idx % 2 == 1) && step_idx == spb - 3 && kick_hit == 0 &&
-        (style_id == 0 || style_id == 2)) {
+        (kit == KIT_BLUES_SHUFFLE || kit == KIT_CLASSIC_ROCK)) {
         kick_hit = 1;
     }
 
@@ -1152,6 +1667,8 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
                 s_note = (step_idx == spb - 1) ? GM_LOW_TOM :
                          (step_idx == spb - 2) ? GM_MID_TOM : GM_SNARE_1;
                 if (s_note != GM_SNARE_1) s_gate = (SAMPLE_RATE * 650) / 1000;
+            } else if (kit == KIT_BOSSA_NOVA) {
+                s_note = GM_SIDE_STICK;
             } else {
                 s_note = (snare_hit == 2) ? GM_SNARE_2 : GM_SNARE_1;
             }
@@ -1216,7 +1733,8 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
 
     /* 2. Trigger Electric / Upright Bass (with Beat-4 '&' anticipation & chromatic walking approach) */
     if (g_mix_mode != MIX_DRUMS_ONLY) {
-        bool anticipate = (step_idx == spb - 1) && next_changes && (style_id == 0 || style_id == 2);
+        bool anticipate = (step_idx == spb - 1) && next_changes &&
+                          (kit == KIT_BLUES_SHUFFLE || kit == KIT_CLASSIC_ROCK);
         const BarChord *bass_bc = anticipate ? next_bc : cur_bc;
         uint8_t eff_deg = anticipate ? 1 : bass_deg;
 
@@ -1253,7 +1771,7 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
 
     /* 3. Trigger 4-Voice Smooth Voice-Led Chords (with staggered strum & Beat-4 '&' anticipation) */
     if (g_mix_mode == MIX_FULL_BAND) {
-        float comp_vel = style_comping_velocity(style_id, st->beats_per_bar, bar_idx, step_idx, next_changes);
+        float comp_vel = style_comping_velocity(kit, st->beats_per_bar, bar_idx, step_idx, next_changes);
         if (comp_vel > 0.0f) {
             bool is_antic = (step_idx == spb - 1) && next_changes;
             const BarChord *chord_bc = is_antic ? next_bc : cur_bc;
@@ -1261,7 +1779,7 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
             compute_voice_led_chord(g_key_pc, chord_bc, chord_midi);
 
             if (use_sf2) {
-                int is_gtr = style_chord_is_guitar(style_id);
+                bool is_gtr = kit_chord_is_guitar(kit);
                 int strum_step = is_gtr ? ((SAMPLE_RATE * 11) / 1000) : ((SAMPLE_RATE * 3) / 1000);
                 bool upstroke = is_gtr && ((step_idx % 2) == 1);
                 int gate_mult = (step_idx == 0) ? 2 : 1;
@@ -1279,8 +1797,8 @@ static void trigger_step_voices(int style_id, int bar_idx, int step_idx, int sub
                                       v_vel, gate_samp, false);
                 }
 
-                /* Subtle warm Rock/Tonewheel Organ pad layer on Beat 1 for Rock & Slow Blues */
-                if (step_idx == 0 && (style_id == 1 || style_id == 2 || style_id == 3)) {
+                /* Subtle warm Rock/Tonewheel Organ pad layer on Beat 1 for Rock, Soul & Slow Blues */
+                if (step_idx == 0 && kit_has_organ_pad(kit)) {
                     sf2_release_channel(PB_CH_ORGAN);
                     int pad_gate = (int)((double)g_synth.step_sample_len * (double)(spb - 1) * 0.88);
                     sf2_schedule_note(0, PB_CH_ORGAN, chord_midi[0], 0.42f, pad_gate, false);
@@ -1357,8 +1875,8 @@ static void sequencer_tick_one_sample(bool playing) {
     g_synth.step_sample_pos++;
     if (g_synth.step_sample_pos >= g_synth.step_sample_len) {
         g_synth.step_sample_pos = 0;
-        int spb   = k_styles[g_style_idx].steps_per_bar;
-        int nbars = k_styles[g_style_idx].num_bars;
+        int spb   = (g_num_songs > 0) ? g_songs[g_style_idx].steps_per_bar : 8;
+        int nbars = (g_num_songs > 0) ? g_songs[g_style_idx].num_bars : 1;
         int next_step = g_cur_step + 1;
         if (next_step >= spb) {
             next_step = 0;
@@ -1427,8 +1945,8 @@ static void audio_render_frames(int16_t *out, int frames) {
                     g_synth.step_sample_pos += (uint32_t)chunk;
                     if (g_synth.step_sample_pos >= g_synth.step_sample_len) {
                         g_synth.step_sample_pos = 0;
-                        int spb   = k_styles[g_style_idx].steps_per_bar;
-                        int nbars = k_styles[g_style_idx].num_bars;
+                        int spb   = (g_num_songs > 0) ? g_songs[g_style_idx].steps_per_bar : 8;
+                        int nbars = (g_num_songs > 0) ? g_songs[g_style_idx].num_bars : 1;
                         int next_step = g_cur_step + 1;
                         if (next_step >= spb) {
                             next_step = 0;
@@ -1948,24 +2466,33 @@ static void platform_shutdown(void) {
  * ============================================================================ */
 
 static void init_default_patterns(void) {
-    for (int s = 0; s < NUM_STYLES; s++) {
+    for (int s = 0; s < g_num_songs; s++) {
         for (int t = 0; t < NUM_TRACKS; t++) {
             for (int st = 0; st < MAX_STEPS; st++) {
-                g_pattern[s][t][st] = k_styles[s].default_steps[t][st];
+                g_pattern[s][t][st] = g_songs[s].default_steps[t][st];
             }
         }
     }
 }
 
+static int find_song_by_filename(const char *fname) {
+    if (!fname || !fname[0]) return -1;
+    for (int i = 0; i < g_num_songs; i++) {
+        if (strcmp(g_songs[i].filename, fname) == 0) return i;
+    }
+    return -1;
+}
+
 static void apply_style(int style_idx) {
-    style_idx = ((style_idx % NUM_STYLES) + NUM_STYLES) % NUM_STYLES;
+    if (g_num_songs <= 0) return;
+    style_idx = ((style_idx % g_num_songs) + g_num_songs) % g_num_songs;
     pthread_mutex_lock(&g_audio_mutex);
     g_style_idx = style_idx;
-    g_bpm       = k_styles[style_idx].default_bpm;
-    g_swing_pct = k_styles[style_idx].swing_pct;
+    g_bpm       = g_songs[style_idx].default_bpm;
+    g_swing_pct = g_songs[style_idx].swing_pct;
     g_cur_bar   = 0;
     g_cur_step  = 0;
-    if (g_edit_step >= k_styles[style_idx].steps_per_bar) {
+    if (g_edit_step >= g_songs[style_idx].steps_per_bar) {
         g_edit_step = 0;
     }
     g_synth.step_sample_pos = 0;
@@ -1994,9 +2521,10 @@ static void resolve_config_path(void) {
 }
 
 static void save_config(void) {
-    if (g_config_path[0] == '\0') return;
+    if (g_config_path[0] == '\0' || g_num_songs <= 0) return;
     FILE *f = fopen(g_config_path, "w");
     if (!f) return;
+    fprintf(f, "song_file=%s\n", g_songs[g_style_idx].filename);
     fprintf(f, "style_idx=%d\n", g_style_idx);
     fprintf(f, "key_pc=%d\n", g_key_pc);
     fprintf(f, "bpm=%d\n", g_bpm);
@@ -2012,14 +2540,25 @@ static void save_config(void) {
 static void load_config(void) {
     init_default_patterns();
     apply_style(0);
+    if (g_num_songs > 0 && g_songs[0].default_key_pc >= 0) {
+        g_key_pc = g_songs[0].default_key_pc;
+    }
     if (g_config_path[0] == '\0') return;
     FILE *f = fopen(g_config_path, "r");
     if (!f) return;
 
-    char line[128];
+    bool matched_file = false;
+    char line[160];
     while (fgets(line, sizeof(line), f)) {
         int v = 0;
-        if (sscanf(line, "style_idx=%d", &v) == 1 && v >= 0 && v < NUM_STYLES) {
+        char fname[64];
+        if (sscanf(line, "song_file=%63s", fname) == 1) {
+            int idx = find_song_by_filename(fname);
+            if (idx >= 0) {
+                apply_style(idx);
+                matched_file = true;
+            }
+        } else if (!matched_file && sscanf(line, "style_idx=%d", &v) == 1 && v >= 0 && v < g_num_songs) {
             apply_style(v);
         } else if (sscanf(line, "key_pc=%d", &v) == 1 && v >= 0 && v < 12) {
             g_key_pc = v;
@@ -2039,11 +2578,12 @@ static void load_config(void) {
 }
 
 /* ============================================================================
- * 8. NATIVE 640x480 UI RENDERING: TOP BAR, JAM VIEW, STEP EDITOR & HELP MODAL
+ * 8. NATIVE 640x480 UI RENDERING: TOP BAR, SONG CHART JAM VIEW, STEP EDITOR,
+ *    L2 FRETBOARD OVERLAY & Y HELP MODAL (WITH FAMOUS SONG EXAMPLES)
  * ============================================================================ */
 
 static void render_top_status_bar(void) {
-    const StylePreset *st = &k_styles[g_style_idx];
+    const StylePreset *st = &g_songs[g_style_idx];
     fill_rect(0, 0, NATIVE_W, 42, RGB(21, 30, 48));
     fill_rect(0, 40, NATIVE_W, 2, RGB(56, 78, 112));
 
@@ -2055,9 +2595,11 @@ static void render_top_status_bar(void) {
                        (g_view == VIEW_JAM) ? "SEL: JAM VIEW" : "SEL: STEP EDIT",
                        RGB(255, 255, 255));
 
-    /* 2. Style / Genre Pill */
+    /* 2. Active Song Pill (auto-fits longer custom song names) */
+    char song_hdr[72];
+    snprintf(song_hdr, sizeof(song_hdr), "%d/%d %s", g_style_idx + 1, g_num_songs, st->name);
     draw_pill(142, 6, 198, 28, RGB(30, 41, 59), RGB(96, 165, 250));
-    draw_text_centered(FONT_UI_13, 142, 6, 198, 28, st->name, RGB(254, 240, 138));
+    draw_text_fit(FONT_UI_13, 142, 6, 198, 28, song_hdr, RGB(254, 240, 138));
 
     /* 3. Key Badge */
     char key_str[24];
@@ -2080,7 +2622,7 @@ static void render_top_status_bar(void) {
 }
 
 static void render_step_strip_and_footer(void) {
-    const StylePreset *st = &k_styles[g_style_idx];
+    const StylePreset *st = &g_songs[g_style_idx];
     int spb = st->steps_per_bar;
 
     /* Beat & '&' Step Strip: y = 382..434 (52px) */
@@ -2137,8 +2679,8 @@ static void render_step_strip_and_footer(void) {
     draw_text_centered(FONT_UI_13, 8, by + 7, 134, 28, mix_lbl, RGB(224, 242, 254));
 
     const char *ctrl_txt = (g_view == VIEW_JAM)
-        ? "A: Play/Stop  |  L/R: Style  |  U/D: Key  |  L1/R1: BPM  |  L2: Neck"
-        : "A: Cycle Hit/Note  |  B: Clear  |  DPad: Move Cursor  |  L1/R1: BPM";
+        ? "A: Play | L/R: Song | U/D: Key | L1/R1: BPM | L2: Fretboard"
+        : "A: Cycle Hit/Note | B: Clear | DPad: Cursor | L2: Fretboard";
     draw_text_centered(FONT_UI_11, 146, by + 7, NATIVE_W - 242, 28, ctrl_txt, RGB(203, 213, 225));
 
     draw_pill(NATIVE_W - 92, by + 7, 84, 28, RGB(30, 58, 95), RGB(96, 165, 250));
@@ -2146,158 +2688,313 @@ static void render_step_strip_and_footer(void) {
 }
 
 static void render_jam_view(void) {
-    const StylePreset *st = &k_styles[g_style_idx];
+    const StylePreset *st = &g_songs[g_style_idx];
     int bar      = g_cur_bar % st->num_bars;
     int next_bar = (bar + 1) % st->num_bars;
 
     const BarChord *cur_bc  = &st->bars[bar];
     const BarChord *next_bc = &st->bars[next_bar];
 
-    char cur_chord_str[24], next_chord_str[24];
+    char cur_chord_str[24], next_chord_str[24], tones_str[48];
     format_chord_label(g_key_pc, cur_bc, cur_chord_str, sizeof(cur_chord_str));
     format_chord_label(g_key_pc, next_bc, next_chord_str, sizeof(next_chord_str));
+    format_chord_tones(g_key_pc, cur_bc, tones_str, sizeof(tones_str));
 
-    /* 1. Left Card: NOW PLAYING CHORD, CHORD TONES & BASS WALK (x=8..316, y=48..178) */
-    int cy = 48, ch = 130;
-    fill_rect(8, cy, 308, ch, RGB(21, 30, 48));
-    draw_border(8, cy, 308, ch, 2, RGB(56, 189, 248));
+    /* 1. Top Strip (y = 48..138, height = 90px): NOW PLAYING + NEXT / LIVE MIX VU */
+    int cy = 48, ch = 90;
 
-    char bar_hdr[40];
+    /* 1a. Left Card: NOW PLAYING CHORD & CHORD TONES (x = 8..364, w = 356px) */
+    fill_rect(8, cy, 356, ch, RGB(21, 30, 48));
+    draw_border(8, cy, 356, ch, 2, RGB(56, 189, 248));
+
+    char bar_hdr[48];
     snprintf(bar_hdr, sizeof(bar_hdr), "NOW PLAYING: BAR %d OF %d", bar + 1, st->num_bars);
-    draw_text(FONT_UI_13, 18, cy + 8, bar_hdr, RGB(125, 211, 252));
+    draw_text(FONT_UI_13, 18, cy + 7, bar_hdr, RGB(125, 211, 252));
 
-    draw_pill(232, cy + 6, 74, 24, RGB(146, 92, 12), RGB(250, 204, 21));
-    draw_text_centered(FONT_UI_13, 232, cy + 6, 74, 24, cur_bc->roman, RGB(255, 255, 255));
+    draw_pill(274, cy + 5, 82, 22, RGB(146, 92, 12), RGB(250, 204, 21));
+    draw_text_fit(FONT_UI_13, 274, cy + 5, 82, 22, cur_bc->roman, RGB(255, 255, 255));
 
-    /* Hero Chord Pill on Left + Chord Tones Card on Right of Left Card */
-    draw_pill(18, cy + 36, 132, 56, RGB(15, 23, 38), RGB(250, 204, 21));
-    draw_text_centered(FONT_TITLE_28, 18, cy + 36, 132, 56, cur_chord_str, RGB(250, 204, 21));
+    draw_pill(16, cy + 32, 146, 50, RGB(15, 23, 38), RGB(250, 204, 21));
+    draw_text_fit(FONT_TITLE_28, 16, cy + 32, 146, 50, cur_chord_str, RGB(250, 204, 21));
 
-    int root_pc  = (g_key_pc + cur_bc->root_offset) % 12;
-    int third_pc = (root_pc + ((cur_bc->qual == CHQ_MIN || cur_bc->qual == CHQ_MIN7) ? 3 : 4)) % 12;
-    int fifth_pc = (root_pc + 7) % 12;
-    char tones_str[48];
-    if (cur_bc->qual == CHQ_DOM7 || cur_bc->qual == CHQ_MAJ7 || cur_bc->qual == CHQ_MIN7) {
-        int sev_pc = (root_pc + ((cur_bc->qual == CHQ_MAJ7) ? 11 : 10)) % 12;
-        snprintf(tones_str, sizeof(tones_str), "%s - %s - %s - %s",
-                 k_note_names[root_pc], k_note_names[third_pc],
-                 k_note_names[fifth_pc], k_note_names[sev_pc]);
-    } else {
-        snprintf(tones_str, sizeof(tones_str), "%s - %s - %s",
-                 k_note_names[root_pc], k_note_names[third_pc], k_note_names[fifth_pc]);
-    }
-    fill_rect(158, cy + 36, 148, 56, RGB(15, 23, 38));
-    draw_border(158, cy + 36, 148, 56, 1, RGB(51, 68, 98));
-    draw_text_centered(FONT_UI_11, 158, cy + 42, 148, 16, "CHORD TONES", RGB(148, 163, 184));
-    draw_text_centered(FONT_UI_13, 158, cy + 62, 148, 22, tones_str, RGB(248, 250, 252));
+    fill_rect(170, cy + 32, 186, 50, RGB(15, 23, 38));
+    draw_border(170, cy + 32, 186, 50, 1, RGB(51, 68, 98));
+    draw_text_centered(FONT_UI_11, 170, cy + 36, 186, 15, "CHORD TONES", RGB(148, 163, 184));
+    draw_text_fit(FONT_UI_13, 170, cy + 54, 186, 22, tones_str, RGB(248, 250, 252));
 
-    /* Active Bassline Sequence Strip at bottom of Left Card */
-    char bass_seq[64] = "Bass Walk:  ";
-    for (int s = 0; s < st->steps_per_bar; s++) {
-        uint8_t d = g_pattern[g_style_idx][TRK_BASS][s];
-        strncat(bass_seq, k_bass_deg_labels[d], sizeof(bass_seq) - strlen(bass_seq) - 1);
-        if (s + 1 < st->steps_per_bar) {
-            strncat(bass_seq, "  ", sizeof(bass_seq) - strlen(bass_seq) - 1);
-        }
-    }
-    draw_text(FONT_UI_13, 18, cy + 100, bass_seq, RGB(110, 231, 183));
-
-    /* 2. Right Card: NEXT CHORD & 4-BAR PROGRESSION (x=324..632, y=48..178) */
-    fill_rect(324, cy, 308, ch, RGB(21, 30, 48));
-    draw_border(324, cy, 308, ch, 2, RGB(51, 68, 98));
+    /* 1b. Right Card: NEXT CHORD, ACTIVE BASS & 5-TRACK LIVE VU METERS (x = 372..632, w = 260px) */
+    fill_rect(372, cy, 260, ch, RGB(21, 30, 48));
+    draw_border(372, cy, 260, ch, 2, RGB(51, 68, 98));
 
     char next_hdr[64];
-    snprintf(next_hdr, sizeof(next_hdr), "NEXT (BAR %d): %s (%s)",
+    snprintf(next_hdr, sizeof(next_hdr), "NEXT (B%d): %s (%s)",
              next_bar + 1, next_chord_str, next_bc->roman);
-    draw_text(FONT_UI_13, 334, cy + 8, next_hdr, RGB(250, 204, 21));
+    draw_text_clipped(FONT_UI_13, 382, cy + 7, 240, next_hdr, RGB(250, 204, 21));
 
     uint8_t cur_bass_deg = g_pattern[g_style_idx][TRK_BASS][g_cur_step % st->steps_per_bar];
     char b_pitch[32], b_line[64];
     format_bass_pitch_name(g_key_pc, cur_bc, cur_bass_deg, b_pitch, sizeof(b_pitch));
-    snprintf(b_line, sizeof(b_line), "Step %d Bass: %s", (g_cur_step % st->steps_per_bar) + 1, b_pitch);
-    draw_text(FONT_UI_13, 334, cy + 32, b_line, RGB(186, 230, 253));
+    snprintf(b_line, sizeof(b_line), "Bass: %s  |  %s", b_pitch, st->short_genre);
+    draw_text_clipped(FONT_UI_11, 382, cy + 28, 240, b_line, RGB(110, 231, 183));
 
-    /* 4-Bar Progression Window Preview inside Right Card */
-    int win_start = (bar / 4) * 4;
-    int cell_w    = 68;
-    for (int i = 0; i < 4; i++) {
-        int bidx = (win_start + i) % st->num_bars;
-        char cstr[16];
-        format_chord_label(g_key_pc, &st->bars[bidx], cstr, sizeof(cstr));
-        bool is_cur = (bidx == bar);
-        int cx = 334 + i * (cell_w + 5);
-        draw_pill(cx, cy + 60, cell_w, 60,
-                  is_cur ? RGB(37, 99, 235) : RGB(15, 22, 34),
-                  is_cur ? RGB(250, 204, 21) : RGB(51, 68, 98));
-        draw_text_centered(FONT_UI_16, cx, cy + 64, cell_w, 26, cstr,
-                           is_cur ? RGB(254, 240, 138) : RGB(226, 232, 240));
-        char rstr[24];
-        snprintf(rstr, sizeof(rstr), "B%d:%s", bidx + 1, st->bars[bidx].roman);
-        draw_text_centered(FONT_UI_11, cx, cy + 92, cell_w, 20, rstr,
-                           is_cur ? RGB(186, 230, 253) : RGB(120, 136, 158));
+    /* Compact 5-Track Live VU Meter Strip */
+    static const char *k_vu_lbl[5] = { "KCK", "SNR", "HAT", "BAS", "CHD" };
+    const float vu_vals[5] = {
+        g_synth.vu_kick, g_synth.vu_snare, g_synth.vu_hat, g_synth.vu_bass, g_synth.vu_chord
+    };
+    const uint32_t vu_cols[5] = {
+        RGB(239, 68, 68), RGB(245, 158, 11), RGB(56, 189, 248),
+        RGB(16, 185, 129), RGB(168, 85, 247)
+    };
+    int vu_x0 = 382;
+    int vu_w  = 44;
+    int vu_gap = 5;
+    for (int i = 0; i < 5; i++) {
+        int vx = vu_x0 + i * (vu_w + vu_gap);
+        fill_rect(vx, cy + 48, vu_w, 16, RGB(15, 22, 34));
+        draw_border(vx, cy + 48, vu_w, 16, 1, RGB(45, 62, 92));
+        float lv = vu_vals[i];
+        if (lv < 0.0f) lv = 0.0f;
+        if (lv > 1.0f) lv = 1.0f;
+        int fw = (int)(lv * (float)(vu_w - 4));
+        if (fw > 0) {
+            fill_rect(vx + 2, cy + 50, fw, 12, vu_cols[i]);
+        }
+        draw_text_centered(FONT_UI_11, vx, cy + 66, vu_w, 16, k_vu_lbl[i], RGB(148, 163, 184));
     }
 
-    /* 3. Hero 12-Fret Guitar Soloing Scale Map (x=8..632, y=184..376, height=192px) */
-    int fy = 184, fh = 192;
-    fill_rect(8, fy, NATIVE_W - 16, fh, RGB(21, 30, 48));
-    draw_border(8, fy, NATIVE_W - 16, fh, 2, RGB(51, 68, 98));
+    /* 2. HERO FULL SONG STRUCTURE CHART (x = 8..632, y = 144..376, height = 232px) */
+    int gy = 144, gh = 232;
+    fill_rect(8, gy, NATIVE_W - 16, gh, RGB(21, 30, 48));
+    draw_border(8, gy, NATIVE_W - 16, gh, 2, RGB(51, 68, 98));
+
+    int page_bars  = 16;
+    int total_pages = (st->num_bars + page_bars - 1) / page_bars;
+    int cur_page   = bar / page_bars;
+    int page_start = cur_page * page_bars;
+    int bars_on_page = st->num_bars - page_start;
+    if (bars_on_page > page_bars) bars_on_page = page_bars;
+
+    char chart_hdr[80];
+    if (total_pages > 1) {
+        snprintf(chart_hdr, sizeof(chart_hdr), "SONG CHART (%d BARS - PAGE %d/%d)",
+                 st->num_bars, cur_page + 1, total_pages);
+    } else {
+        snprintf(chart_hdr, sizeof(chart_hdr), "SONG CHART (%d BARS)", st->num_bars);
+    }
+    draw_text(FONT_UI_13, 18, gy + 7, chart_hdr, RGB(250, 204, 21));
+
+    /* Solo Scale summary (omit parenthetical degrees for clean fit) + L2 Fretboard shortcut pill */
+    char clean_sc[64];
+    snprintf(clean_sc, sizeof(clean_sc), "%s", st->scale_name);
+    char *paren = strchr(clean_sc, '(');
+    if (paren) {
+        *paren = '\0';
+        pb_trim(clean_sc);
+    }
+    char sc_mini[96];
+    snprintf(sc_mini, sizeof(sc_mini), "Scale: %s %s", k_note_names[g_key_pc], clean_sc);
+    draw_text_clipped(FONT_UI_11, 212, gy + 9, 284, sc_mini, RGB(148, 163, 184));
+
+    draw_pill(504, gy + 4, 120, 22, RGB(23, 52, 74), RGB(56, 189, 248));
+    draw_text_centered(FONT_UI_11, 504, gy + 4, 120, 22, "[L2] Fretboard", RGB(224, 242, 254));
+
+    /* Multi-row 4-bar-per-line Chart Grid (y = gy + 30 .. gy + gh - 8 = 194px height) */
+    int num_rows = (bars_on_page + 3) / 4;
+    if (num_rows < 1) num_rows = 1;
+    if (num_rows > 4) num_rows = 4;
+
+    int grid_y0 = gy + 32;
+    int grid_h  = gh - 40; /* 192px */
+    int row_gap = (num_rows <= 2) ? 10 : (num_rows == 3) ? 8 : 6;
+    int row_h   = (grid_h - (num_rows - 1) * row_gap) / num_rows;
+
+    int sec_x   = 16;
+    int sec_w   = 48;
+    int col_x0  = 70;
+    int col_gap = 6;
+    int cell_w  = (624 - col_x0 - 3 * col_gap) / 4; /* 134px per bar cell */
+
+    int spb = st->steps_per_bar;
+    float bar_prog = g_playing ? ((float)(g_cur_step + 1) / (float)(spb > 0 ? spb : 1)) : 0.0f;
+
+    for (int r = 0; r < num_rows; r++) {
+        int ry = grid_y0 + r * (row_h + row_gap);
+        int row_first_bar = page_start + r * 4;
+        int row_idx_global = row_first_bar / 4;
+        bool row_active = (bar >= row_first_bar && bar < row_first_bar + 4);
+
+        /* Section Gutter Pill (A, A', B, BRG, TURN, or B1-4) */
+        char sec_lbl[32];
+        if (row_idx_global < st->num_sections && st->section_labels[row_idx_global][0]) {
+            snprintf(sec_lbl, sizeof(sec_lbl), "%s", st->section_labels[row_idx_global]);
+        } else {
+            snprintf(sec_lbl, sizeof(sec_lbl), "%d-%d",
+                     row_first_bar + 1,
+                     (row_first_bar + 4 <= st->num_bars) ? (row_first_bar + 4) : st->num_bars);
+        }
+        draw_pill(sec_x, ry, sec_w, row_h,
+                  row_active ? RGB(30, 58, 95) : RGB(15, 22, 34),
+                  row_active ? RGB(250, 204, 21) : RGB(45, 62, 92));
+        draw_text_fit(FONT_UI_13, sec_x, ry, sec_w, row_h, sec_lbl,
+                      row_active ? RGB(254, 240, 138) : RGB(148, 163, 184));
+
+        /* 4 Measure Cells in this Row */
+        for (int c = 0; c < 4; c++) {
+            int bidx = row_first_bar + c;
+            int cx = col_x0 + c * (cell_w + col_gap);
+            if (bidx >= st->num_bars) {
+                draw_pill(cx, ry, cell_w, row_h, RGB(14, 20, 32), RGB(32, 44, 66));
+                continue;
+            }
+            const BarChord *bc = &st->bars[bidx];
+            char cstr[24];
+            format_chord_label(g_key_pc, bc, cstr, sizeof(cstr));
+
+            bool is_cur  = (bidx == bar);
+            bool is_next = (bidx == next_bar);
+            bool is_fill = ((bidx + 1) % 4 == 0 && g_auto_fill);
+
+            uint32_t fill = is_cur  ? RGB(37, 99, 235) :
+                            is_next ? RGB(26, 46, 76)  : RGB(15, 22, 34);
+            uint32_t bdr  = is_cur  ? RGB(250, 204, 21) :
+                            is_next ? RGB(96, 165, 250) : RGB(45, 62, 92);
+
+            draw_pill(cx, ry, cell_w, row_h, fill, bdr);
+            if (is_cur) {
+                draw_border(cx - 1, ry - 1, cell_w + 2, row_h + 2, 1, RGB(254, 240, 138));
+            }
+
+            /* Bar number in top-left corner */
+            char bnum[16];
+            snprintf(bnum, sizeof(bnum), "%d", bidx + 1);
+            draw_text(FONT_UI_11, cx + 6, ry + 3, bnum,
+                      is_cur ? RGB(254, 240, 138) : RGB(100, 116, 139));
+
+            /* Subtle turnaround / fill indicator dot in top-right of every 4th bar */
+            if (is_fill) {
+                fill_rect(cx + cell_w - 10, ry + 6, 4, 4,
+                          is_cur ? RGB(244, 114, 182) : RGB(148, 86, 130));
+            }
+
+            if (num_rows >= 4) {
+                /* 16-bar compact layout (134x44px): Chord centered-top, Roman bottom-right */
+                draw_text_fit(FONT_UI_16, cx + 16, ry + 3, cell_w - 22, 22, cstr,
+                              is_cur ? RGB(254, 240, 138) : RGB(241, 245, 249));
+                draw_text_fit(FONT_UI_11, cx + 6, ry + 24, cell_w - 12, 14, bc->roman,
+                              is_cur ? RGB(186, 230, 253) : RGB(120, 136, 158));
+            } else if (num_rows == 3) {
+                /* 12-bar spacious layout (134x58px) */
+                draw_text_fit(FONT_UI_20, cx + 10, ry + 6, cell_w - 20, 28, cstr,
+                              is_cur ? RGB(254, 240, 138) : RGB(241, 245, 249));
+                draw_text_fit(FONT_UI_11, cx + 6, ry + 36, cell_w - 12, 16, bc->roman,
+                              is_cur ? RGB(186, 230, 253) : RGB(120, 136, 158));
+            } else {
+                /* 8-bar hero layout (134x86px) */
+                draw_text_fit(FONT_TITLE_28, cx + 8, ry + 14, cell_w - 16, 36, cstr,
+                              is_cur ? RGB(254, 240, 138) : RGB(241, 245, 249));
+                draw_text_fit(FONT_UI_13, cx + 6, ry + 54, cell_w - 12, 20, bc->roman,
+                              is_cur ? RGB(186, 230, 253) : RGB(148, 163, 184));
+            }
+
+            /* Active-bar beat progress bar along the bottom edge of the active cell */
+            if (is_cur && bar_prog > 0.0f) {
+                int pw = (int)(bar_prog * (float)(cell_w - 8));
+                if (pw < 4) pw = 4;
+                fill_rect(cx + 4, ry + row_h - 5, cell_w - 8, 3, RGB(23, 52, 110));
+                fill_rect(cx + 4, ry + row_h - 5, pw, 3, RGB(250, 204, 21));
+            }
+        }
+    }
+}
+
+/* Full-screen [L2] Fretboard Modal Overlay for the Current Key & Active Song Scale */
+static void render_fretboard_modal(void) {
+    const StylePreset *st = &g_songs[g_style_idx];
+    int bar = g_cur_bar % st->num_bars;
+    const BarChord *cur_bc = &st->bars[bar];
+
+    char cur_chord_str[24], tones_str[48];
+    format_chord_label(g_key_pc, cur_bc, cur_chord_str, sizeof(cur_chord_str));
+    format_chord_tones(g_key_pc, cur_bc, tones_str, sizeof(tones_str));
+
+    int mx = 10, my = 12, mw = NATIVE_W - 20, mh = NATIVE_H - 24;
+    fill_rect(mx, my, mw, mh, RGB(15, 23, 38));
+    draw_border(mx, my, mw, mh, 2, RGB(56, 189, 248));
+    draw_border(mx + 3, my + 3, mw - 6, mh - 6, 1, RGB(37, 99, 235));
+
+    /* Top Header */
+    fill_rect(mx + 4, my + 4, mw - 8, 40, RGB(26, 38, 60));
+    fill_rect(mx + 4, my + 44, mw - 8, 2, RGB(56, 78, 112));
+
+    draw_pill(mx + 12, my + 10, 124, 28, RGB(23, 52, 74), RGB(56, 189, 248));
+    draw_text_centered(FONT_UI_13, mx + 12, my + 10, 124, 28, "L2: FRETBOARD", RGB(224, 242, 254));
+
+    char hdr_title[80];
+    snprintf(hdr_title, sizeof(hdr_title), "KEY OF %s  -  %s", k_note_names[g_key_pc], st->name);
+    draw_text_clipped(FONT_UI_16, mx + 144, my + 14, 316, hdr_title, RGB(254, 240, 138));
+
+    char now_pill[32];
+    snprintf(now_pill, sizeof(now_pill), "NOW: %s", cur_chord_str);
+    draw_pill(mx + mw - 144, my + 10, 132, 28, RGB(146, 92, 12), RGB(250, 204, 21));
+    draw_text_fit(FONT_UI_13, mx + mw - 144, my + 10, 132, 28, now_pill, RGB(255, 255, 255));
+
+    /* Scale Banner + Color Legend */
+    fill_rect(mx + 4, my + 46, mw - 8, 34, RGB(19, 29, 48));
+    fill_rect(mx + 4, my + 80, mw - 8, 1, RGB(48, 66, 98));
 
     char sc_hdr[112];
-    snprintf(sc_hdr, sizeof(sc_hdr), "SOLO SCALE: %s %s", k_note_names[g_key_pc], st->scale_name);
-    draw_text(FONT_UI_13, 18, fy + 6, sc_hdr, RGB(250, 204, 21));
+    snprintf(sc_hdr, sizeof(sc_hdr), "SCALE: %s %s", k_note_names[g_key_pc], st->scale_name);
+    draw_text_clipped(FONT_UI_13, mx + 14, my + 54, 380, sc_hdr, RGB(250, 204, 21));
 
-    /* Color Legend on top-right of Scale Card */
-    draw_circle_aa(468.0f, (float)(fy + 15), 6.0f, 1.5f, RGB(245, 158, 11), RGB(254, 240, 138));
-    draw_text(FONT_UI_11, 478, fy + 8, "Key", RGB(254, 240, 138));
-    draw_circle_aa(518.0f, (float)(fy + 15), 6.0f, 1.5f, RGB(5, 150, 105), RGB(167, 243, 208));
-    draw_text(FONT_UI_11, 528, fy + 8, "Chord", RGB(167, 243, 208));
-    draw_circle_aa(580.0f, (float)(fy + 15), 6.0f, 1.5f, RGB(219, 39, 119), RGB(251, 207, 232));
-    draw_text(FONT_UI_11, 590, fy + 8, "Blue", RGB(251, 207, 232));
+    draw_pill(mx + mw - 196, my + 50, 184, 26, RGB(30, 58, 95), RGB(96, 165, 250));
+    draw_text_centered(FONT_UI_11, mx + mw - 196, my + 50, 184, 26,
+                       g_neck_notes ? "[A/X] Labels: NOTE NAMES" : "[A/X] Labels: INTERVALS",
+                       RGB(224, 242, 254));
 
-    int nut_x  = 66;
-    int fret_w = 45; /* 12 frets * 45px = 540px (x = 66..606) */
+    /* Spacious 12-Fret Rosewood Guitar Neck */
+    int nut_x  = mx + 64;
+    int fret_w = 44; /* 12 frets * 44px = 528px */
     int neck_w = fret_w * 12;
-    int str_y0 = fy + 48;
-    int str_dy = 25; /* 5 spaces * 25px = 125px */
+    int str_y0 = my + 124;
+    int str_dy = 36; /* 5 spaces * 36px = 180px */
     int neck_h = str_dy * 5;
 
-    /* Rosewood fingerboard + bone nut + fret wires */
-    fill_rect(nut_x, str_y0 - 10, neck_w, neck_h + 20, RGB(38, 26, 20));
-    draw_border(nut_x, str_y0 - 10, neck_w, neck_h + 20, 2, RGB(92, 64, 44));
-    fill_rect(nut_x - 5, str_y0 - 10, 6, neck_h + 20, RGB(241, 245, 249));
+    fill_rect(nut_x, str_y0 - 14, neck_w, neck_h + 28, RGB(38, 26, 20));
+    draw_border(nut_x, str_y0 - 14, neck_w, neck_h + 28, 2, RGB(108, 76, 52));
+    fill_rect(nut_x - 6, str_y0 - 14, 7, neck_h + 28, RGB(241, 245, 249));
 
     for (int f = 0; f <= 12; f++) {
         int fx = nut_x + f * fret_w;
         if (f > 0) {
-            fill_rect(fx - 1, str_y0 - 9, 2, neck_h + 18, RGB(148, 163, 184));
+            fill_rect(fx - 1, str_y0 - 13, 2, neck_h + 26, RGB(148, 163, 184));
         }
-        int cx = (f == 0) ? 46 : (nut_x + f * fret_w - fret_w / 2);
+        int cx = (f == 0) ? (nut_x - 20) : (nut_x + f * fret_w - fret_w / 2);
         char fn[8];
         snprintf(fn, sizeof(fn), "%d", f);
         bool marker = (f == 0 || f == 3 || f == 5 || f == 7 || f == 9 || f == 12);
-        draw_text_centered(FONT_UI_11, cx - 12, fy + 25, 24, 14, fn,
+        draw_text_centered(FONT_UI_13, cx - 12, my + 88, 24, 18, fn,
                            marker ? RGB(250, 204, 21) : RGB(148, 163, 184));
 
         if (f == 3 || f == 5 || f == 7 || f == 9) {
-            draw_circle_aa((float)cx, (float)(str_y0 + neck_h / 2), 4.5f, 1.0f,
-                           RGB(82, 75, 68), RGB(120, 113, 108));
+            draw_circle_aa((float)cx, (float)(str_y0 + neck_h / 2), 4.8f, 1.0f,
+                           RGB(82, 75, 68), RGB(130, 122, 115));
         } else if (f == 12) {
-            draw_circle_aa((float)cx, (float)(str_y0 + str_dy * 1 + 12), 4.5f, 1.0f,
-                           RGB(82, 75, 68), RGB(120, 113, 108));
-            draw_circle_aa((float)cx, (float)(str_y0 + str_dy * 3 + 12), 4.5f, 1.0f,
-                           RGB(82, 75, 68), RGB(120, 113, 108));
+            draw_circle_aa((float)cx, (float)(str_y0 + str_dy * 1 + str_dy / 2), 4.8f, 1.0f,
+                           RGB(82, 75, 68), RGB(130, 122, 115));
+            draw_circle_aa((float)cx, (float)(str_y0 + str_dy * 3 + str_dy / 2), 4.8f, 1.0f,
+                           RGB(82, 75, 68), RGB(130, 122, 115));
         }
     }
 
     int cur_chord_pc = (g_key_pc + cur_bc->root_offset) % 12;
 
-    /* 6 guitar strings + labeled anti-aliased scale/chord/root circles */
     for (int r = 0; r < 6; r++) {
         int sy = str_y0 + r * str_dy;
         int thick = (r >= 3) ? 2 : 1;
         fill_rect(nut_x, sy - thick / 2, neck_w, thick,
                   (r >= 3) ? RGB(203, 213, 225) : RGB(148, 163, 184));
-        draw_text(FONT_UI_13, 18, sy - 9, k_gtr_str_lbl[r], RGB(186, 230, 253));
+        draw_text(FONT_UI_16, mx + 14, sy - 10, k_gtr_str_lbl[r], RGB(186, 230, 253));
 
         int open_pc = k_gtr_str_pc[r];
         for (int f = 0; f <= 12; f++) {
@@ -2305,7 +3002,7 @@ static void render_jam_view(void) {
             int rel = (pc - g_key_pc + 12) % 12;
             uint8_t mask = st->scale_mask[rel];
             if (mask > 0) {
-                int cx = (f == 0) ? 46 : (nut_x + f * fret_w - fret_w / 2);
+                int cx = (f == 0) ? (nut_x - 20) : (nut_x + f * fret_w - fret_w / 2);
                 bool is_key_root   = (pc == g_key_pc);
                 bool is_chord_root = (pc == cur_chord_pc);
                 uint32_t dfill = is_key_root   ? RGB(245, 158, 11) :
@@ -2315,16 +3012,47 @@ static void render_jam_view(void) {
                                  is_chord_root ? RGB(167, 243, 208) : RGB(224, 242, 254);
                 uint32_t tcol  = is_key_root   ? RGB(15, 23, 42)    : RGB(255, 255, 255);
 
-                draw_circle_aa((float)cx, (float)sy, 10.5f, 1.8f, dfill, dbdr);
+                draw_circle_aa((float)cx, (float)sy, 13.0f, 2.0f, dfill, dbdr);
                 const char *dlbl = g_neck_notes ? k_note_names[pc] : k_interval_labels[rel];
-                draw_text_centered(FONT_UI_11, cx - 10, sy - 10, 20, 20, dlbl, tcol);
+                draw_text_centered(FONT_UI_13, cx - 13, sy - 12, 26, 24, dlbl, tcol);
             }
         }
     }
+
+    /* Legend + Active Bar Target Chord Tones Strip */
+    int ly = my + 332;
+    fill_rect(mx + 14, ly, mw - 28, 74, RGB(21, 31, 50));
+    draw_border(mx + 14, ly, mw - 28, 74, 1, RGB(51, 68, 98));
+
+    /* Legend row */
+    draw_circle_aa((float)(mx + 34), (float)(ly + 20), 8.0f, 1.5f, RGB(245, 158, 11), RGB(254, 240, 138));
+    draw_text(FONT_UI_13, mx + 48, ly + 12, "Key Root", RGB(254, 240, 138));
+
+    draw_circle_aa((float)(mx + 160), (float)(ly + 20), 8.0f, 1.5f, RGB(5, 150, 105), RGB(167, 243, 208));
+    draw_text(FONT_UI_13, mx + 174, ly + 12, "Active Chord Root", RGB(167, 243, 208));
+
+    draw_circle_aa((float)(mx + 344), (float)(ly + 20), 8.0f, 1.5f, RGB(219, 39, 119), RGB(251, 207, 232));
+    draw_text(FONT_UI_13, mx + 358, ly + 12, "Blue / Color", RGB(251, 207, 232));
+
+    draw_circle_aa((float)(mx + 478), (float)(ly + 20), 8.0f, 1.5f, RGB(2, 132, 199), RGB(224, 242, 254));
+    draw_text(FONT_UI_13, mx + 492, ly + 12, "Scale Tone", RGB(224, 242, 254));
+
+    /* Live Target Chord Tones */
+    char target_line[160];
+    snprintf(target_line, sizeof(target_line), "Bar %d/%d: %s (%s)   |   Target Chord Tones: %s",
+             bar + 1, st->num_bars, cur_chord_str, cur_bc->roman, tones_str);
+    draw_text_centered(FONT_UI_13, mx + 18, ly + 42, mw - 36, 24, target_line, RGB(248, 250, 252));
+
+    /* Modal Footer */
+    fill_rect(mx + 4, my + mh - 34, mw - 8, 30, RGB(12, 18, 30));
+    fill_rect(mx + 4, my + mh - 34, mw - 8, 1, RGB(51, 65, 85));
+    draw_text_centered(FONT_UI_11, mx + 8, my + mh - 32, mw - 16, 26,
+                       "[A/X] Intervals/Notes  |  [U/D] Transpose Key  |  [L/R] Song  |  [L2/B] Close",
+                       RGB(186, 230, 253));
 }
 
 static void render_step_editor_view(void) {
-    const StylePreset *st = &k_styles[g_style_idx];
+    const StylePreset *st = &g_songs[g_style_idx];
     int spb = st->steps_per_bar;
     int bar = g_cur_bar % st->num_bars;
     const BarChord *cur_bc = &st->bars[bar];
@@ -2382,9 +3110,7 @@ static void render_step_editor_view(void) {
                     bdr  = RGB(56, 189, 248);
                     snprintf(cell_top, sizeof(cell_top), "%s", k_bass_deg_labels[val]);
                     int chord_root_pc = (g_key_pc + cur_bc->root_offset) % 12;
-                    int third_semi = (cur_bc->qual == CHQ_MIN || cur_bc->qual == CHQ_MIN7) ? 3 : 4;
-                    int off = (val == 1) ? 0 : (val == 2) ? third_semi : (val == 3) ? 7 :
-                              (val == 4) ? 9 : (val == 5) ? 10 : 12;
+                    int off = bass_degree_semitone_offset(cur_bc, val);
                     snprintf(cell_sub, sizeof(cell_sub), "%s", k_note_names[(chord_root_pc + off) % 12]);
                     tcol = RGB(255, 255, 255);
                 }
@@ -2421,70 +3147,80 @@ static void render_step_editor_view(void) {
 }
 
 static void render_help_modal(void) {
-    int mx = 20, my = 12, mw = NATIVE_W - 40, mh = NATIVE_H - 24;
+    const StylePreset *st = &g_songs[g_style_idx];
+    int mx = 16, my = 10, mw = NATIVE_W - 32, mh = NATIVE_H - 20;
     fill_rect(mx, my, mw, mh, RGB(15, 23, 38));
     draw_border(mx, my, mw, mh, 2, RGB(96, 165, 250));
     draw_border(mx + 3, my + 3, mw - 6, mh - 6, 1, RGB(37, 99, 235));
 
-    fill_rect(mx + 4, my + 4, mw - 8, 38, RGB(28, 39, 60));
-    fill_rect(mx + 4, my + 42, mw - 8, 2, RGB(64, 82, 115));
-    draw_pill(mx + 12, my + 8, 76, 28, RGB(37, 99, 235), RGB(147, 197, 253));
-    draw_text_centered(FONT_UI_13, mx + 12, my + 8, 76, 28, "HELP", RGB(255, 255, 255));
-    draw_text(FONT_UI_20, mx + 98, my + 10, "POCKETBAND - QUICK GUIDE & GROOVE", RGB(248, 250, 252));
+    fill_rect(mx + 4, my + 4, mw - 8, 36, RGB(28, 39, 60));
+    fill_rect(mx + 4, my + 40, mw - 8, 2, RGB(64, 82, 115));
+    draw_pill(mx + 12, my + 8, 72, 26, RGB(37, 99, 235), RGB(147, 197, 253));
+    draw_text_centered(FONT_UI_13, mx + 12, my + 8, 72, 26, "HELP", RGB(255, 255, 255));
+    draw_text(FONT_UI_16, mx + 94, my + 12, "POCKETBAND - SONG STRUCTURE & CONTROLS", RGB(248, 250, 252));
 
-    fill_rect(mx + 4, my + 44, mw - 8, 22, RGB(19, 29, 48));
-    fill_rect(mx + 4, my + 66, mw - 8, 1, RGB(48, 66, 98));
-    draw_text_centered(FONT_UI_13, mx + 8, my + 44, mw - 16, 22,
-                       "5-track drum, bass & chord backing band with 12-fret guitar soloing map.",
-                       RGB(186, 230, 253));
+    /* Current Song Structure, Famous Examples & Groove Settings Card */
+    int gy = my + 48;
+    int gh = 114;
+    fill_rect(mx + 14, gy, mw - 28, gh, RGB(23, 33, 52));
+    draw_border(mx + 14, gy, mw - 28, gh, 2, RGB(52, 211, 153));
 
-    /* Groove & Feel Box */
-    int gy = my + 72;
-    fill_rect(mx + 14, gy, mw - 28, 68, RGB(23, 33, 52));
-    draw_border(mx + 14, gy, mw - 28, 68, 2, RGB(52, 211, 153));
+    char g1[112];
+    snprintf(g1, sizeof(g1), "Song [%d/%d]: %s (%d Bars, %d/4)  |  Key %s  |  %d BPM",
+             g_style_idx + 1, g_num_songs, st->name, st->num_bars,
+             st->beats_per_bar, k_note_names[g_key_pc], g_bpm);
+    draw_text_fit(FONT_UI_13, mx + 18, gy + 6, mw - 36, 20, g1, RGB(250, 204, 21));
 
-    char g1[96];
-    snprintf(g1, sizeof(g1), "Style: %s (%d/4)   |   Key: %s   |   %d BPM",
-             k_styles[g_style_idx].name, k_styles[g_style_idx].beats_per_bar,
-             k_note_names[g_key_pc], g_bpm);
-    draw_text_centered(FONT_UI_16, mx + 14, gy + 8, mw - 28, 24, g1, RGB(250, 204, 21));
+    char ex_line[160];
+    snprintf(ex_line, sizeof(ex_line), "Follows: %s", st->examples);
+    draw_text_wrapped_centered(FONT_UI_13, mx + 20, gy + 28, mw - 40, 18, 2, ex_line, RGB(248, 250, 252));
+
+    char file_line[112];
+    snprintf(file_line, sizeof(file_line), "File: songs/%s   |   Scale: %s",
+             st->filename, st->scale_name);
+    draw_text_fit(FONT_UI_11, mx + 20, gy + 68, mw - 40, 16, file_line, RGB(148, 163, 184));
 
     char g2[96];
     snprintf(g2, sizeof(g2), "[LEFT / RIGHT] Swing: %d%%   |   [A] 4-Bar Auto-Fill: %s",
              g_swing_pct, g_auto_fill ? "ON" : "OFF");
-    draw_text_centered(FONT_UI_13, mx + 14, gy + 38, mw - 28, 20, g2, RGB(167, 243, 208));
+    draw_text_centered(FONT_UI_13, mx + 18, gy + 88, mw - 36, 20, g2, RGB(167, 243, 208));
 
     /* Controls Table */
-    int ky = gy + 78;
+    int ky = gy + gh + 10;
     static const struct {
         const char *btn;
         const char *desc;
     } k_rows[7] = {
-        { "SELECT",       "Switch Guitarist Jam View <-> 5-Track Step Editor" },
+        { "SELECT",       "Switch Song Chart Jam View <-> 5-Track Step Editor" },
         { "A Button",     "Jam: Play/Stop  |  Step Edit: Cycle Hit / Bass Note" },
         { "B Button",     "Jam: Queue Drum Fill  |  Step Edit: Clear Step" },
         { "X Button",     "Cycle Mix: Full Band -> Drums+Bass -> Drums Only" },
-        { "LEFT / RIGHT", "Jam: Cycle 6 Styles (Blues/Rock/Jazz) | Edit: Step" },
-        { "UP / DOWN",    "Jam: Transpose Key (C .. B) | Edit: Select Track" },
-        { "L1/R1 / L2/R2","L1/R1: Tempo -/+5 BPM | L2: Neck Dots | R2: Swing" }
+        { "LEFT / RIGHT", "Jam: Cycle Disk Songs (*.song)  |  Edit: Select Step" },
+        { "UP / DOWN",    "Jam: Transpose Key (C .. B)  |  Edit: Select Track" },
+        { "L1/R1 / L2/R2","L1/R1: Tempo -/+5 BPM | L2: Fretboard | R2: Swing" }
     };
 
     for (int i = 0; i < 7; i++) {
-        int ry = ky + i * 37;
-        draw_pill(mx + 16, ry, 136, 28, RGB(30, 58, 95), RGB(71, 98, 145));
-        draw_text_centered(FONT_UI_13, mx + 16, ry, 136, 28, k_rows[i].btn, RGB(254, 240, 138));
-        draw_text(FONT_UI_13, mx + 164, ry + 6, k_rows[i].desc, RGB(226, 232, 240));
+        int ry = ky + i * 35;
+        draw_pill(mx + 16, ry, 134, 27, RGB(30, 58, 95), RGB(71, 98, 145));
+        draw_text_centered(FONT_UI_13, mx + 16, ry, 134, 27, k_rows[i].btn, RGB(254, 240, 138));
+        draw_text(FONT_UI_13, mx + 160, ry + 5, k_rows[i].desc, RGB(226, 232, 240));
     }
 
-    fill_rect(mx + 4, my + mh - 34, mw - 8, 30, RGB(12, 18, 30));
-    fill_rect(mx + 4, my + mh - 34, mw - 8, 1, RGB(51, 65, 85));
-    draw_text_centered(FONT_UI_13, mx, my + mh - 32, mw, 26,
+    fill_rect(mx + 4, my + mh - 32, mw - 8, 28, RGB(12, 18, 30));
+    fill_rect(mx + 4, my + mh - 32, mw - 8, 1, RGB(51, 65, 85));
+    draw_text_centered(FONT_UI_13, mx, my + mh - 30, mw, 24,
                        "Press [Y] or [B] to close Help   |   [MENU] Save & Exit",
                        RGB(186, 230, 253));
 }
 
 static void render_ui(void) {
     fill_rect(0, 0, NATIVE_W, NATIVE_H, RGB(13, 18, 28));
+    if (g_num_songs <= 0) {
+        draw_text_centered(FONT_UI_20, 20, 200, NATIVE_W - 40, 32,
+                           "No .song files found in songs/ directory", RGB(248, 113, 113));
+        return;
+    }
     render_top_status_bar();
     if (g_view == VIEW_JAM) {
         render_jam_view();
@@ -2492,7 +3228,9 @@ static void render_ui(void) {
         render_step_editor_view();
     }
     render_step_strip_and_footer();
-    if (g_show_help) {
+    if (g_show_fretboard) {
+        render_fretboard_modal();
+    } else if (g_show_help) {
         render_help_modal();
     }
 }
@@ -2504,6 +3242,11 @@ static void render_ui(void) {
 int main(int argc, char *argv[]) {
     signal(SIGINT,  handle_sig);
     signal(SIGTERM, handle_sig);
+
+    if (load_all_songs_from_disk() <= 0) {
+        fprintf(stderr, "pocketband: error: no valid *.song files found in ./songs or /userdata/roms/ports/pocketband/songs\n");
+        return 1;
+    }
 
     init_synth();
     resolve_config_path();
@@ -2527,7 +3270,8 @@ int main(int argc, char *argv[]) {
             }
         }
         double rms = sqrt(energy / (double)(total_frames * AUDIO_CHANNELS));
-        printf("pocketband audio-test: sf2=%s path=%s peak=%d rms=%.1f\n",
+        printf("pocketband audio-test: songs=%d sf2=%s path=%s peak=%d rms=%.1f\n",
+               g_num_songs,
                g_sf2_loaded ? "YES" : "NO",
                g_sf2_loaded ? g_sf2.loaded_path : "(fallback-dsp)",
                peak, rms);
@@ -2541,53 +3285,71 @@ int main(int argc, char *argv[]) {
         char path[512];
         int16_t dummy_pcm[AUDIO_FRAMES * AUDIO_CHANNELS];
 
-        /* 1. Default Guitarist Jam View: Blues Shuffle 4/4 in Key of A */
-        apply_style(0);
-        g_key_pc     = 9; /* Key of A */
-        g_view       = VIEW_JAM;
-        g_mix_mode   = MIX_FULL_BAND;
-        g_neck_notes = false;
-        g_playing    = true;
-        g_cur_bar    = 0;
-        g_cur_step   = 0;
-        g_show_help  = false;
+        /* 1. Jam View: 16-bar Blue Bossa (or first 16-bar song) showing full 4x4 chart */
+        int bossa_idx = find_song_by_filename("11_blue_bossa.song");
+        apply_style(bossa_idx >= 0 ? bossa_idx : 0);
+        g_key_pc         = 0; /* Key of C */
+        g_view           = VIEW_JAM;
+        g_mix_mode       = MIX_FULL_BAND;
+        g_neck_notes     = false;
+        g_playing        = true;
+        g_cur_bar        = 4;
+        g_cur_step       = 0;
+        g_show_help      = false;
+        g_show_fretboard = false;
         g_synth.step_sample_pos = 0;
         for (int i = 0; i < 6; i++) audio_render_frames(dummy_pcm, AUDIO_FRAMES);
-        g_cur_step = 2;
+        g_cur_bar  = 4;
+        g_cur_step = 3;
         render_ui();
         snprintf(path, sizeof(path), "%s/pocketband_jam.bmp", dir);
         save_bmp(path);
 
         /* 2. Step Sequencer View (4/4 Classic Rock Drum & Bass Grid) */
-        apply_style(2);
-        g_key_pc     = 4; /* Key of E */
-        g_view       = VIEW_STEP_EDITOR;
-        g_edit_track = TRK_BASS;
-        g_edit_step  = 3;
-        g_cur_step   = 4;
-        g_show_help  = false;
+        int rock_idx = find_song_by_filename("04_classic_rock.song");
+        apply_style(rock_idx >= 0 ? rock_idx : 0);
+        g_key_pc         = 4; /* Key of E */
+        g_view           = VIEW_STEP_EDITOR;
+        g_edit_track     = TRK_BASS;
+        g_edit_step      = 3;
+        g_cur_step       = 4;
+        g_show_help      = false;
+        g_show_fretboard = false;
         render_ui();
         snprintf(path, sizeof(path), "%s/pocketband_steps.bmp", dir);
         save_bmp(path);
 
-        /* 3. Jazz Waltz 3/4 Jam View in Key of C with Note Names on Fretboard */
-        apply_style(5);
-        g_key_pc     = 0; /* Key of C */
-        g_view       = VIEW_JAM;
-        g_mix_mode   = MIX_DRUM_BASS;
-        g_neck_notes = true;
-        g_cur_bar    = 2;
-        g_cur_step   = 0;
-        g_show_help  = false;
+        /* 3. 12-Bar Blues Shuffle Jam View in Key of A */
+        int blues_idx = find_song_by_filename("01_blues_shuffle.song");
+        apply_style(blues_idx >= 0 ? blues_idx : 0);
+        g_key_pc         = 9; /* Key of A */
+        g_view           = VIEW_JAM;
+        g_mix_mode       = MIX_FULL_BAND;
+        g_cur_bar        = 4;
+        g_cur_step       = 0;
+        g_show_help      = false;
+        g_show_fretboard = false;
         g_synth.step_sample_pos = 0;
         for (int i = 0; i < 6; i++) audio_render_frames(dummy_pcm, AUDIO_FRAMES);
+        g_cur_bar  = 4;
         g_cur_step = 4;
         render_ui();
         snprintf(path, sizeof(path), "%s/pocketband_waltz.bmp", dir);
         save_bmp(path);
 
-        /* 4. Help & Groove Settings Modal */
-        g_show_help = true;
+        /* 4. Full-Screen [L2] Fretboard Modal Overlay (Key of A, Intervals) */
+        g_show_fretboard = true;
+        g_neck_notes     = false;
+        render_ui();
+        snprintf(path, sizeof(path), "%s/pocketband_fretboard.bmp", dir);
+        save_bmp(path);
+
+        /* 5. Help & Song Structure Info Modal (showing famous song examples!) */
+        int desc_idx = find_song_by_filename("06_descending_rock.song");
+        apply_style(desc_idx >= 0 ? desc_idx : 0);
+        g_key_pc         = 11; /* Key of B */
+        g_show_fretboard = false;
+        g_show_help      = true;
         render_ui();
         snprintf(path, sizeof(path), "%s/pocketband_help.bmp", dir);
         save_bmp(path);
@@ -2605,6 +3367,10 @@ int main(int argc, char *argv[]) {
 
         if (pressed & BTN_Y) {
             g_show_help = !g_show_help;
+            if (g_show_help) g_show_fretboard = false;
+        } else if (pressed & BTN_L2) {
+            g_show_fretboard = !g_show_fretboard;
+            if (g_show_fretboard) g_show_help = false;
         } else if (pressed & BTN_L1) {
             g_bpm -= 5;
             if (g_bpm < 45) g_bpm = 45;
@@ -2613,16 +3379,29 @@ int main(int argc, char *argv[]) {
             g_bpm += 5;
             if (g_bpm > 220) g_bpm = 220;
             save_config();
-        } else if (pressed & BTN_L2) {
-            g_neck_notes = !g_neck_notes;
-            save_config();
         } else if (pressed & BTN_R2) {
             g_swing_pct += 3;
             if (g_swing_pct > 68) g_swing_pct = 50;
             save_config();
-        } else if (pressed & BTN_X) {
-            g_mix_mode = (BackingMixMode)(((int)g_mix_mode + 1) % 3);
-            save_config();
+        } else if (g_show_fretboard) {
+            if (pressed & (BTN_A | BTN_X)) {
+                g_neck_notes = !g_neck_notes;
+                save_config();
+            } else if (pressed & BTN_UP) {
+                g_key_pc = (g_key_pc + 1) % 12;
+                save_config();
+            } else if (pressed & BTN_DOWN) {
+                g_key_pc = (g_key_pc + 11) % 12;
+                save_config();
+            } else if (pressed & BTN_RIGHT) {
+                apply_style(g_style_idx + 1);
+                save_config();
+            } else if (pressed & BTN_LEFT) {
+                apply_style(g_style_idx - 1);
+                save_config();
+            } else if (pressed & (BTN_B | BTN_SELECT)) {
+                g_show_fretboard = false;
+            }
         } else if (g_show_help) {
             if (pressed & BTN_LEFT) {
                 if (g_swing_pct > 50) g_swing_pct -= 2;
@@ -2633,9 +3412,15 @@ int main(int argc, char *argv[]) {
             } else if (pressed & BTN_A) {
                 g_auto_fill = !g_auto_fill;
                 save_config();
+            } else if (pressed & BTN_X) {
+                g_mix_mode = (BackingMixMode)(((int)g_mix_mode + 1) % 3);
+                save_config();
             } else if (pressed & (BTN_B | BTN_SELECT)) {
                 g_show_help = false;
             }
+        } else if (pressed & BTN_X) {
+            g_mix_mode = (BackingMixMode)(((int)g_mix_mode + 1) % 3);
+            save_config();
         } else if (pressed & BTN_SELECT) {
             g_view = (g_view == VIEW_JAM) ? VIEW_STEP_EDITOR : VIEW_JAM;
         } else if (g_view == VIEW_JAM) {
@@ -2666,7 +3451,7 @@ int main(int argc, char *argv[]) {
                 save_config();
             }
         } else {
-            int spb = k_styles[g_style_idx].steps_per_bar;
+            int spb = g_songs[g_style_idx].steps_per_bar;
             if (pressed & BTN_UP) {
                 g_edit_track = (g_edit_track + NUM_TRACKS - 1) % NUM_TRACKS;
             } else if (pressed & BTN_DOWN) {

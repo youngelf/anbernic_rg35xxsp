@@ -1,0 +1,26 @@
+# 16-Bar Minor Rock Ballad in 3/4 (Classic Dorian-flavored minor folk-rock form)
+
+name = Rock Ballad 3/4
+genre = ROCK 3/4
+examples = House of the Rising Sun, Nothing Else Matters
+meter = 3/4
+bpm = 96
+swing = 50
+default_key = A
+kit = rock_ballad
+
+scale_name = Natural Minor / Dorian (1 2 b3 4 5 b6 b7)
+scale = 1 2 b3 4 5 *b6 b7
+
+sections = A | A' | B | TURN
+chords = i | bIII | IV | bVI
+chords = i | bIII | V7 | V7
+chords = i | bIII | IV | bVI
+chords = i | V7   | i  | V7
+
+# 8th-note steps: 1 & 2 & 3 &
+kick  = 2 . . 1 . .
+snare = . . . . 2 .
+clhat = 2 1 1 1 2 .
+ophat = . . . . . 1
+bass  = R R 5 5 8 5

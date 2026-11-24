@@ -1,0 +1,26 @@
+# 12-Bar Blues Shuffle in 4/4 (Classic slow-change I7 - IV7 - V7 form)
+# Comments start with '#'. See README.txt in this folder to write your own songs.
+
+name = Blues Shuffle 4/4
+genre = BLUES 4/4
+examples = Sweet Home Chicago, Red House, Pride and Joy
+meter = 4/4
+bpm = 110
+swing = 65
+default_key = A
+kit = blues_shuffle
+
+scale_name = Minor Pentatonic + Blues (1 b3 4 b5 5 b7)
+scale = 1 b3 4 *b5 5 b7
+
+sections = A | B | TURN
+chords = I7  | I7  | I7  | I7
+chords = IV7 | IV7 | I7  | I7
+chords = V7  | IV7 | I7  | V7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &
+kick  = 2 . . . 1 . . 1
+snare = . . 2 . . . 2 .
+clhat = 2 1 2 1 2 1 2 1
+ophat = . . . . . . . .
+bass  = R 5 6 5 R 5 6 b7

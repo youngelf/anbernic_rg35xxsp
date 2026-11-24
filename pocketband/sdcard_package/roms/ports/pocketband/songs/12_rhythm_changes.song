@@ -1,0 +1,26 @@
+# 16-Bar Rhythm Changes Form (8-Bar I-vi-ii-V A-Section + 8-Bar Dominant Cycle Bridge)
+
+name = Rhythm Changes
+genre = JAZZ 4/4
+examples = I Got Rhythm, Oleo, Anthropology, Flintstones Theme
+meter = 4/4
+bpm = 152
+swing = 64
+default_key = Bb
+kit = jazz_swing
+
+scale_name = Major / Bebop Dominant (1 2 3 4 5 6 b7 7)
+scale = 1 2 3 4 5 6 *b7 7
+
+sections = A | A' | BRG | BRG
+chords = Imaj7  | vi7     | ii7   | V7
+chords = IVmaj7 | #ivdim7 | Imaj7 | V7
+chords = III7   | III7    | VI7   | VI7
+chords = II7    | II7     | V7    | V7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &
+kick  = 1 . . . 1 . . .
+snare = . . . 1 . . . 1
+clhat = . . 2 . . . 2 .
+ophat = 2 . 1 1 2 . 1 1
+bass  = R . 3 . 5 . 7 .

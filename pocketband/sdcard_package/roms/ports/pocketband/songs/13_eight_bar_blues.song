@@ -1,0 +1,24 @@
+# 8-Bar Classic Blues Form (I7 - V7 - IV7 - IV7 | I7 - V7 - I7 - V7)
+
+name = 8-Bar Blues 4/4
+genre = BLUES 4/4
+examples = Key to the Highway, Worried Life Blues, Heartbreak Hotel
+meter = 4/4
+bpm = 104
+swing = 64
+default_key = A
+kit = blues_shuffle
+
+scale_name = Minor Pentatonic + Blues (1 b3 4 b5 5 b7)
+scale = 1 b3 4 *b5 5 b7
+
+sections = A | TURN
+chords = I7 | V7 | IV7 | IV7
+chords = I7 | V7 | I7  | V7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &
+kick  = 2 . . . 1 . . 1
+snare = . . 2 . . . 2 .
+clhat = 2 1 2 1 2 1 2 1
+ophat = . . . . . . . .
+bass  = R 5 6 5 R 5 6 b7

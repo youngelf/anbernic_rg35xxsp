@@ -1,0 +1,26 @@
+# 16-Bar Bossa Nova Jazz Standard (Minor i7-iv7 with bII Major modulation in Bars 9-12)
+
+name = Blue Bossa 4/4
+genre = BOSSA 4/4
+examples = Blue Bossa (Kenny Dorham), Black Orpheus
+meter = 4/4
+bpm = 136
+swing = 50
+default_key = C
+kit = bossa_nova
+
+scale_name = Natural Minor + Dorian (1 2 b3 4 5 b6 b7)
+scale = 1 2 b3 4 5 b6 *6 b7
+
+sections = A | A' | MOD | TURN
+chords = i7     | i7   | iv7     | iv7
+chords = iim7b5 | V7   | i7      | i7
+chords = biii7  | bVI7 | bIImaj7 | bIImaj7
+chords = iim7b5 | V7   | i7      | V7
+
+# 8th-note steps: 1 & 2 & 3 & 4 &  (classic surdo bass + bossa clave cross-stick)
+kick  = 2 . . 1 2 . . 1
+snare = 1 . . 1 . . 1 .
+clhat = . . 1 . . . 1 .
+ophat = 1 1 1 1 1 1 1 1
+bass  = R . . 5 R . . 5

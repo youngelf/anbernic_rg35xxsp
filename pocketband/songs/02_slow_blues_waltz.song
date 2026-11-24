@@ -1,0 +1,26 @@
+# 12-Bar Quick-Change Slow Blues in 3/4 Waltz Time
+# Moves to IV7 in Bar 2 before settling back to I7 for expressive slow soloing.
+
+name = Slow Blues 3/4
+genre = BLUES 3/4
+examples = Stormy Monday, Texas Flood, Since I've Been Loving You
+meter = 3/4
+bpm = 86
+swing = 62
+default_key = A
+kit = slow_blues
+
+scale_name = Minor Pentatonic + Blues (1 b3 4 b5 5 b7)
+scale = 1 b3 4 *b5 5 b7
+
+sections = A | B | TURN
+chords = I7  | IV7 | I7  | I7
+chords = IV7 | IV7 | I7  | I7
+chords = V7  | IV7 | I7  | V7
+
+# 8th-note steps: 1 & 2 & 3 &
+kick  = 2 . . 1 . .
+snare = . . . . 2 .
+clhat = 2 1 1 1 1 .
+ophat = . . . . . 1
+bass  = R 3 5 6 5 3
