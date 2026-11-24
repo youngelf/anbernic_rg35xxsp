@@ -104,11 +104,11 @@ A single-screen bedside and desk night clock with 24H retro LED dot-matrix digit
 
 ## [PocketBand](pocketband/)
 
-A 5-track drum machine, walking bassline sequencer, stereo chord-comping backing band, and 12-fret guitar soloing map (`Blues`, `Rock`, and `Jazz` in `4/4` and `3/4`) with live per-track VU meters, interactive Swing/Auto-Fill groove settings, and SoundFont 2 (`pocketband.sf2` / `GeneralUser-GS.sf2`) background audio.
+A 5-track drum machine, walking bassline sequencer, and stereo chord-comping backing band with a full multi-bar **Song Chart** (13 disk-loaded 8/12/16-bar `.song` structures across Blues, Rock, Pop/Soul, Jazz, and Bossa Nova, plus user-creatable `.song` files), live per-track VU meters, an on-demand **`L2` 12-fret guitar soloing overlay**, famous-song structure notes in **`Y` Help**, and SoundFont 2 (`pocketband.sf2` / `GeneralUser-GS.sf2`) background audio.
 
-| Guitarist Jam View (`Blues Shuffle 4/4`) | 5-Track Step & Bassline Editor (`Classic Rock 4/4`) |
+| 16-Bar Song Chart (`Blue Bossa 4/4`) | On-Demand `[L2]` 12-Fret Soloing Overlay |
 | :---: | :---: |
-| ![PocketBand Jam View](pocketband/promo/pocketband_jam.png) | ![PocketBand Step Editor](pocketband/promo/pocketband_steps.png) |
+| ![PocketBand Jam View](pocketband/promo/pocketband_jam.png) | ![PocketBand Fretboard](pocketband/promo/pocketband_fretboard.png) |
 
 
 ## [Pomodoro](pomodoro/)
